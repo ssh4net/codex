@@ -842,7 +842,6 @@ pub async fn run_main(
     let feedback = codex_feedback::CodexFeedback::new();
     let feedback_layer = feedback.logger_layer();
     let feedback_metadata_layer = feedback.metadata_layer();
-    let feedback_auth_event_layer = feedback.auth_event_layer();
 
     if cli.oss && model_provider_override.is_some() {
         // We're in the oss section, so provider_id should be Some
@@ -896,7 +895,6 @@ pub async fn run_main(
         .with(file_layer)
         .with(feedback_layer)
         .with(feedback_metadata_layer)
-        .with(feedback_auth_event_layer)
         .with(log_db_layer)
         .with(otel_logger_layer)
         .with(otel_tracing_layer)

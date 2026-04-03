@@ -259,13 +259,12 @@ async fn shell_command_times_out_with_timeout_ms() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(true ; "with_login")]
 #[test_case(false ; "without_login")]
+#[serial_test::serial(shell_command_unicode_output)]
 async fn unicode_output(login: bool) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.2")).await?;
 
-    // We use a child process on windows instead of a direct builtin like 'echo' to ensure that Powershell
-    // config is actually being set correctly.
     let call_id = "unicode_output";
     let command = if cfg!(windows) {
         "cmd.exe /c echo naïve_café"

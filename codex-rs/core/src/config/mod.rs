@@ -92,7 +92,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
-use similar::DiffableStr;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -1017,7 +1016,7 @@ pub(crate) fn set_project_trust_level_inner(
     //
     // [projects]
     // "/path/to/project" = { trust_level = "trusted" }
-    let project_key = project_path.to_string_lossy().to_string();
+    let project_key = project_trust_key(project_path);
 
     // Ensure top-level `projects` exists as a non-inline, explicit table. If it
     // exists but was previously represented as a non-table (e.g., inline),
@@ -1745,18 +1744,27 @@ impl ConfigToml {
     pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
         let projects = self.projects.clone().unwrap_or_default();
 
-        if let Some(project_config) = projects.get(&resolved_cwd.to_string_lossy().to_string()) {
+        let resolved_cwd_key = project_trust_key(resolved_cwd);
+        let resolved_cwd_raw_key = resolved_cwd.to_string_lossy().to_string();
+        if let Some(project_config) = projects
+            .get(&resolved_cwd_key)
+            .or_else(|| projects.get(&resolved_cwd_raw_key))
+        {
             return Some(project_config.clone());
         }
 
         // If cwd lives inside a git repo/worktree, check whether the root git project
         // (the primary repository working directory) is trusted. This lets
         // worktrees inherit trust from the main project.
-        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd)
-            && let Some(project_config_for_root) =
-                projects.get(&repo_root.to_string_lossy().to_string_lossy().to_string())
-        {
-            return Some(project_config_for_root.clone());
+        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd) {
+            let repo_root_key = project_trust_key(repo_root.as_path());
+            let repo_root_raw_key = repo_root.to_string_lossy().to_string();
+            if let Some(project_config_for_root) = projects
+                .get(&repo_root_key)
+                .or_else(|| projects.get(&repo_root_raw_key))
+            {
+                return Some(project_config_for_root.clone());
+            }
         }
 
         None
@@ -1782,6 +1790,13 @@ impl ConfigToml {
             None => Ok(ConfigProfile::default()),
         }
     }
+}
+
+fn project_trust_key(project_path: &Path) -> String {
+    dunce::canonicalize(project_path)
+        .unwrap_or_else(|_| project_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

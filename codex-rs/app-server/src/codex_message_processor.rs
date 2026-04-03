@@ -2193,6 +2193,13 @@ impl CodexMessageProcessor {
         request_trace: Option<W3cTraceContext>,
     ) {
         let requested_cwd = typesafe_overrides.cwd.clone();
+        let requested_sandbox_trusts_project = matches!(
+            typesafe_overrides.sandbox_mode,
+            Some(
+                codex_protocol::config_types::SandboxMode::WorkspaceWrite
+                    | codex_protocol::config_types::SandboxMode::DangerFullAccess
+            )
+        );
         let mut config = match derive_config_from_params(
             &cli_overrides,
             config_overrides.clone(),
@@ -2216,12 +2223,13 @@ impl CodexMessageProcessor {
 
         if requested_cwd.is_some()
             && !config.active_project.is_trusted()
-            && matches!(
-                config.permissions.sandbox_policy.get(),
-                codex_protocol::protocol::SandboxPolicy::WorkspaceWrite { .. }
-                    | codex_protocol::protocol::SandboxPolicy::DangerFullAccess
-                    | codex_protocol::protocol::SandboxPolicy::ExternalSandbox { .. }
-            )
+            && (requested_sandbox_trusts_project
+                || matches!(
+                    config.permissions.sandbox_policy.get(),
+                    codex_protocol::protocol::SandboxPolicy::WorkspaceWrite { .. }
+                        | codex_protocol::protocol::SandboxPolicy::DangerFullAccess
+                        | codex_protocol::protocol::SandboxPolicy::ExternalSandbox { .. }
+                ))
         {
             let trust_target = resolve_root_git_project_for_trust(config.cwd.as_path())
                 .unwrap_or_else(|| config.cwd.to_path_buf());

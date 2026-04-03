@@ -501,7 +501,7 @@ async fn thread_list_respects_cwd_filter() -> Result<()> {
             model_providers: Some(vec!["mock_provider".to_string()]),
             source_kinds: None,
             archived: None,
-            cwd: Some(target_cwd.to_string_lossy().into_owned()),
+            cwd: Some(target_cwd.join(".").to_string_lossy().into_owned()),
             search_term: None,
         })
         .await?;

@@ -295,11 +295,12 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
 }
 
 #[tokio::test]
-async fn backfill_sessions_normalizes_cwd_before_upsert() {
+async fn backfill_sessions_preserves_case_when_normalizing_cwd_before_upsert() {
     let dir = tempdir().expect("tempdir");
     let codex_home = dir.path().to_path_buf();
     let thread_uuid = Uuid::new_v4();
-    let session_cwd = codex_home.join(".");
+    let session_cwd = codex_home.join("MixedCase").join(".");
+    std::fs::create_dir_all(codex_home.join("MixedCase")).expect("create mixed-case cwd");
     let rollout_path = write_rollout_in_sessions_with_cwd(
         codex_home.as_path(),
         "2026-01-27T12-34-56",
@@ -324,7 +325,7 @@ async fn backfill_sessions_normalizes_cwd_before_upsert() {
         .expect("thread should be backfilled");
 
     assert_eq!(stored.rollout_path, rollout_path);
-    assert_eq!(stored.cwd, normalize_cwd_for_state_db(&session_cwd));
+    assert_eq!(stored.cwd, codex_home.join("MixedCase"));
 }
 
 fn write_rollout_in_sessions(

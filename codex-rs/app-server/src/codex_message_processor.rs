@@ -212,6 +212,7 @@ use codex_core::find_thread_name_by_id;
 use codex_core::find_thread_names_by_ids;
 use codex_core::find_thread_path_by_id_str;
 use codex_core::parse_cursor;
+use codex_core::path_utils;
 use codex_core::plugins::MarketplaceError;
 use codex_core::plugins::MarketplacePluginSource;
 use codex_core::plugins::OPENAI_CURATED_MARKETPLACE_NAME;
@@ -4708,7 +4709,7 @@ impl CodexMessageProcessor {
                     .is_none_or(|filter| source_kind_matches(&summary.source, filter))
                     && cwd
                         .as_ref()
-                        .is_none_or(|expected_cwd| &summary.cwd == expected_cwd)
+                        .is_none_or(|expected_cwd| paths_match(&summary.cwd, expected_cwd))
                 {
                     filtered.push(summary);
                     if filtered.len() >= remaining {
@@ -8028,7 +8029,7 @@ fn collect_resume_override_mismatches(
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
         let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if requested_cwd_path != config_snapshot.cwd {
+        if !paths_match(&requested_cwd_path, &config_snapshot.cwd) {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
                 requested_cwd_path.display(),
@@ -8427,11 +8428,21 @@ async fn read_history_cwd_from_state_db(
     thread_id: Option<ThreadId>,
     rollout_path: &Path,
 ) -> Option<PathBuf> {
-    if let Some(state_db_ctx) = get_state_db(config).await
-        && let Some(thread_id) = thread_id
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
-    {
-        return Some(metadata.cwd);
+    if let Ok(text) = tokio::fs::read_to_string(rollout_path).await {
+        for line in text.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(rollout_line) =
+                serde_json::from_str::<codex_protocol::protocol::RolloutLine>(trimmed)
+            else {
+                continue;
+            };
+            if let RolloutItem::TurnContext(item) = rollout_line.item {
+                return Some(item.cwd);
+            }
+        }
     }
 
     match read_session_meta_line(rollout_path).await {
@@ -8439,7 +8450,14 @@ async fn read_history_cwd_from_state_db(
         Err(err) => {
             let rollout_path = rollout_path.display();
             warn!("failed to read session metadata from rollout {rollout_path}: {err}");
-            None
+            if let Some(state_db_ctx) = get_state_db(config).await
+                && let Some(thread_id) = thread_id
+                && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
+            {
+                Some(metadata.cwd)
+            } else {
+                None
+            }
         }
     }
 }
@@ -8834,6 +8852,16 @@ fn parse_datetime(timestamp: Option<&str>) -> Option<DateTime<Utc>> {
     })
 }
 
+fn paths_match(a: &Path, b: &Path) -> bool {
+    match (
+        path_utils::normalize_for_path_comparison(a),
+        path_utils::normalize_for_path_comparison(b),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => a == b,
+    }
+}
+
 async fn read_updated_at(path: &Path, created_at: Option<&str>) -> Option<String> {
     let updated_at = tokio::fs::metadata(path)
         .await
@@ -9053,6 +9081,45 @@ mod tests {
         assert_eq!(
             collect_resume_override_mismatches(&request, &config_snapshot),
             vec!["service_tier requested=Some(Fast) active=Some(Flex)".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_resume_override_mismatches_treats_wsl_cwd_aliases_as_equal() {
+        let request = ThreadResumeParams {
+            thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            service_tier: None,
+            cwd: Some("/mnt/f/gh/codex".to_string()),
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            persist_extended_history: false,
+        };
+        let config_snapshot = ThreadConfigSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "openai".to_string(),
+            service_tier: None,
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            cwd: PathBuf::from("/mnt/f/GH/codex"),
+            ephemeral: false,
+            reasoning_effort: None,
+            personality: None,
+            session_source: SessionSource::Cli,
+        };
+
+        assert_eq!(
+            collect_resume_override_mismatches(&request, &config_snapshot),
+            Vec::<String>::new()
         );
     }
 

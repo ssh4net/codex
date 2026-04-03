@@ -1425,33 +1425,33 @@ pub(crate) async fn read_session_cwd(
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<PathBuf> {
+    // Prefer rollout data when available so resume/fork reflects the most recent
+    // session directory and preserves the original path spelling instead of a
+    // comparison-normalized SQLite copy.
+    if let Some(path) = path {
+        if let Some(cwd) = read_latest_turn_context(path).await.map(|item| item.cwd) {
+            return Some(cwd);
+        }
+        match read_session_meta_line(path).await {
+            Ok(meta_line) => return Some(meta_line.meta.cwd),
+            Err(err) => {
+                let rollout_path = path.display().to_string();
+                tracing::warn!(
+                    %rollout_path,
+                    %err,
+                    "Failed to read session metadata from rollout"
+                );
+            }
+        }
+    }
+
     if let Some(state_db_ctx) = get_state_db(config).await
         && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
     {
         return Some(metadata.cwd);
     }
 
-    // Prefer the latest TurnContext cwd so resume/fork reflects the most recent
-    // session directory (for the changed-cwd prompt) when DB data is unavailable.
-    // The alternative would be mutating the SessionMeta line when the session cwd
-    // changes, but the rollout is an append-only JSONL log and rewriting the head
-    // would be error-prone.
-    let path = path?;
-    if let Some(cwd) = read_latest_turn_context(path).await.map(|item| item.cwd) {
-        return Some(cwd);
-    }
-    match read_session_meta_line(path).await {
-        Ok(meta_line) => Some(meta_line.meta.cwd),
-        Err(err) => {
-            let rollout_path = path.display().to_string();
-            tracing::warn!(
-                %rollout_path,
-                %err,
-                "Failed to read session metadata from rollout"
-            );
-            None
-        }
-    }
+    None
 }
 
 pub(crate) async fn read_session_model(
@@ -2317,7 +2317,7 @@ trust_level = "untrusted"
     }
 
     #[tokio::test]
-    async fn read_session_cwd_prefers_sqlite_when_thread_id_present() -> std::io::Result<()> {
+    async fn read_session_cwd_prefers_rollout_when_path_present() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let mut config = build_config(&temp_dir).await?;
         config
@@ -2326,7 +2326,7 @@ trust_level = "untrusted"
             .expect("test config should allow sqlite");
 
         let thread_id = ThreadId::new();
-        let rollout_cwd = temp_dir.path().join("rollout-cwd");
+        let rollout_cwd = temp_dir.path().join("Rollout-Cwd");
         let sqlite_cwd = temp_dir.path().join("sqlite-cwd");
         std::fs::create_dir_all(&rollout_cwd)?;
         std::fs::create_dir_all(&sqlite_cwd)?;
@@ -2369,6 +2369,51 @@ trust_level = "untrusted"
             .map_err(std::io::Error::other)?;
 
         let cwd = read_session_cwd(&config, thread_id, Some(&rollout_path))
+            .await
+            .expect("expected cwd");
+        assert_eq!(cwd, temp_dir.path().join("Rollout-Cwd"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_session_cwd_uses_sqlite_without_rollout_path() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config
+            .features
+            .enable(Feature::Sqlite)
+            .expect("test config should allow sqlite");
+
+        let thread_id = ThreadId::new();
+        let sqlite_cwd = temp_dir.path().join("sqlite-cwd");
+        std::fs::create_dir_all(&sqlite_cwd)?;
+
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+        let runtime = codex_state::StateRuntime::init(
+            config.codex_home.clone(),
+            config.model_provider_id.clone(),
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        runtime
+            .mark_backfill_complete(/*last_watermark*/ None)
+            .await
+            .map_err(std::io::Error::other)?;
+
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            rollout_path,
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = sqlite_cwd.clone();
+        let metadata = builder.build(config.model_provider_id.as_str());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .map_err(std::io::Error::other)?;
+
+        let cwd = read_session_cwd(&config, thread_id, /*path*/ None)
             .await
             .expect("expected cwd");
         assert_eq!(cwd, sqlite_cwd);

@@ -791,6 +791,66 @@ mod thread_processor_behavior_tests {
         );
     }
 
+    #[test]
+    fn collect_resume_override_mismatches_treats_cwd_aliases_as_equal() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let preferred_cwd = temp_dir.path().join("project");
+        std::fs::create_dir_all(&preferred_cwd).expect("create project dir");
+        let requested_cwd = preferred_cwd.join(".");
+        let request = ThreadResumeParams {
+            thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            service_tier: None,
+            cwd: Some(requested_cwd.to_string_lossy().into_owned()),
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            permissions: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            exclude_turns: false,
+            persist_extended_history: false,
+        };
+        let config_snapshot = ThreadConfigSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "openai".to_string(),
+            service_tier: None,
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            permission_profile: codex_protocol::models::PermissionProfile::Disabled,
+            active_permission_profile: None,
+            cwd: AbsolutePathBuf::from_absolute_path(preferred_cwd)
+                .expect("test cwd should be absolute"),
+            ephemeral: false,
+            reasoning_effort: None,
+            personality: None,
+            session_source: SessionSource::Cli,
+            thread_source: None,
+        };
+
+        assert_eq!(
+            collect_resume_override_mismatches(&request, &config_snapshot),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn cwd_with_preferred_spelling_recovers_alias_spelling() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let preferred_cwd = temp_dir.path().join("MixedCase");
+        std::fs::create_dir_all(&preferred_cwd).expect("create project dir");
+
+        assert_eq!(
+            cwd_with_preferred_spelling(&preferred_cwd, Some(preferred_cwd.join("."))),
+            Some(preferred_cwd)
+        );
+    }
+
     fn test_thread_metadata(
         model: Option<&str>,
         reasoning_effort: Option<ReasoningEffort>,

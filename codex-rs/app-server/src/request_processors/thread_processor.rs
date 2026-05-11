@@ -23,6 +23,20 @@ struct ThreadListFilters {
     relation_filter: Option<StoreThreadRelationFilter>,
 }
 
+fn paths_match(a: &Path, b: &Path) -> bool {
+    path_utils::paths_match_after_normalization(a, b)
+}
+
+fn cwd_with_preferred_spelling(preferred_cwd: &Path, cwd: Option<PathBuf>) -> Option<PathBuf> {
+    cwd.map(|cwd| {
+        if paths_match(preferred_cwd, &cwd) {
+            preferred_cwd.to_path_buf()
+        } else {
+            cwd
+        }
+    })
+}
+
 fn collect_resume_override_mismatches(
     request: &ThreadResumeParams,
     config_snapshot: &ThreadConfigSnapshot,
@@ -55,7 +69,7 @@ fn collect_resume_override_mismatches(
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
         let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if requested_cwd_path != config_snapshot.cwd().as_path() {
+        if !paths_match(&requested_cwd_path, config_snapshot.cwd().as_path()) {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
                 requested_cwd_path.display(),
@@ -2717,7 +2731,8 @@ impl ThreadRequestProcessor {
             }
         };
 
-        let history_cwd = thread_history.session_cwd();
+        let history_cwd =
+            cwd_with_preferred_spelling(&self.config.cwd, thread_history.session_cwd());
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -3436,7 +3451,8 @@ impl ThreadRequestProcessor {
         } else {
             Arc::new(history_items)
         };
-        let history_cwd = Some(source_thread.cwd.clone());
+        let history_cwd =
+            cwd_with_preferred_spelling(&self.config.cwd, Some(source_thread.cwd.clone()));
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();

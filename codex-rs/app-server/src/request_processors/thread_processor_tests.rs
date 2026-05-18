@@ -807,6 +807,7 @@ mod thread_processor_behavior_tests {
             model_provider: None,
             service_tier: None,
             cwd: Some(requested_cwd.to_string_lossy().into_owned()),
+            runtime_workspace_roots: None,
             approval_policy: None,
             approvals_reviewer: None,
             sandbox: None,
@@ -828,6 +829,8 @@ mod thread_processor_behavior_tests {
             active_permission_profile: None,
             cwd: AbsolutePathBuf::from_absolute_path(preferred_cwd)
                 .expect("test cwd should be absolute"),
+            workspace_roots: Vec::new(),
+            profile_workspace_roots: Vec::new(),
             ephemeral: false,
             reasoning_effort: None,
             personality: None,

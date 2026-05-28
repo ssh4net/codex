@@ -833,7 +833,16 @@ mod thread_processor_behavior_tests {
             profile_workspace_roots: Vec::new(),
             ephemeral: false,
             reasoning_effort: None,
+            reasoning_summary: None,
             personality: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
             session_source: SessionSource::Cli,
             thread_source: None,
         };

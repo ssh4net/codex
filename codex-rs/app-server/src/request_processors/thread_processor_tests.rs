@@ -817,7 +817,7 @@ mod thread_processor_behavior_tests {
             developer_instructions: None,
             personality: None,
             exclude_turns: false,
-            persist_extended_history: false,
+            initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
             model: "gpt-5".to_string(),
@@ -827,8 +827,11 @@ mod thread_processor_behavior_tests {
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
             permission_profile: codex_protocol::models::PermissionProfile::Disabled,
             active_permission_profile: None,
-            cwd: AbsolutePathBuf::from_absolute_path(preferred_cwd)
-                .expect("test cwd should be absolute"),
+            environments: TurnEnvironmentSelections::new(
+                AbsolutePathBuf::from_absolute_path(preferred_cwd)
+                    .expect("test cwd should be absolute"),
+                Vec::new(),
+            ),
             workspace_roots: Vec::new(),
             profile_workspace_roots: Vec::new(),
             ephemeral: false,
@@ -844,6 +847,8 @@ mod thread_processor_behavior_tests {
                 },
             },
             session_source: SessionSource::Cli,
+            forked_from_thread_id: None,
+            parent_thread_id: None,
             thread_source: None,
         };
 

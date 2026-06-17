@@ -584,7 +584,7 @@ fn enum_to_string<T: serde::Serialize>(value: &T) -> String {
 }
 
 fn normalize_cwd(cwd: PathBuf) -> PathBuf {
-    codex_utils_path::normalize_for_path_comparison(cwd.as_path()).unwrap_or(cwd)
+    codex_utils_path::normalize_for_path_persistence(cwd)
 }
 
 async fn apply_thread_git_info_patch(
@@ -817,6 +817,13 @@ mod tests {
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
     use crate::local::test_support::write_session_file_with_history_mode;
+
+    #[test]
+    fn normalize_cwd_preserves_case_for_persisted_paths() {
+        let normalized = normalize_cwd(PathBuf::from("/mnt/F/GH/Codex/./child/.."));
+
+        assert_eq!(normalized, PathBuf::from("/mnt/F/GH/Codex"));
+    }
 
     #[tokio::test]
     async fn update_thread_metadata_sets_name_on_active_rollout_and_indexes_name() {
@@ -1889,8 +1896,7 @@ mod tests {
         let child = workspace.join("child");
         std::fs::create_dir_all(child.as_path()).expect("create workspace");
         let unnormalized_cwd = child.join("..");
-        let normalized_cwd = codex_utils_path::normalize_for_path_comparison(workspace.as_path())
-            .expect("normalize cwd");
+        let normalized_cwd = codex_utils_path::normalize_for_path_persistence(workspace.as_path());
 
         store
             .update_thread_metadata(UpdateThreadMetadataParams {

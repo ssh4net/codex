@@ -13,7 +13,15 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::UserMessageEvent;
 use pretty_assertions::assert_eq;
 use std::path::Path;
+use std::path::PathBuf;
 use tempfile::TempDir;
+
+#[test]
+fn normalize_cwd_for_state_db_preserves_case_for_persisted_paths() {
+    let normalized = normalize_cwd_for_state_db(Path::new("/mnt/F/GH/Codex/./child/.."));
+
+    assert_eq!(normalized, PathBuf::from("/mnt/F/GH/Codex"));
+}
 
 #[test]
 fn cursor_to_anchor_normalizes_timestamp_format() {

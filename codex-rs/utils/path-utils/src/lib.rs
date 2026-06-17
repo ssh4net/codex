@@ -15,6 +15,28 @@ pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<
     Ok(normalize_for_wsl(canonical))
 }
 
+/// Normalize cwd-like values before persistence without resolving filesystem
+/// aliases or changing path spelling. User-visible paths should keep their case;
+/// alias-insensitive normalization belongs at comparison sites.
+pub fn normalize_for_path_persistence(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        normalized
+    }
+}
+
 /// Compare paths after applying Codex's filesystem normalization.
 ///
 /// If either path cannot be normalized, this falls back to direct path equality.

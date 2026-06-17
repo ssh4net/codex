@@ -296,23 +296,7 @@ fn cursor_to_anchor(cursor: Option<&Cursor>) -> Option<codex_state::Anchor> {
 }
 
 pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
-    // Keep persisted cwd values case-preserving because they surface in user-visible
-    // thread metadata and resume flows. Alias-insensitive matching belongs at compare sites.
-    let mut normalized = PathBuf::new();
-    for component in cwd.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        cwd.to_path_buf()
-    } else {
-        normalized
-    }
+    codex_utils_path::normalize_for_path_persistence(cwd)
 }
 
 /// List thread ids from SQLite for parity checks without rollout scanning.

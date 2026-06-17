@@ -79,6 +79,28 @@ mod native_workdir {
     }
 }
 
+mod path_persistence {
+    use super::super::normalize_for_path_persistence;
+    use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
+
+    #[test]
+    fn collapses_current_and_parent_components_without_changing_case() {
+        let normalized =
+            normalize_for_path_persistence(PathBuf::from("/mnt/F/GH/Codex/./child/.."));
+
+        assert_eq!(normalized, PathBuf::from("/mnt/F/GH/Codex"));
+    }
+
+    #[test]
+    fn returns_original_when_normalized_path_would_be_empty() {
+        let path = PathBuf::from(".");
+        let normalized = normalize_for_path_persistence(path.clone());
+
+        assert_eq!(normalized, path);
+    }
+}
+
 mod path_comparison {
     use super::super::paths_match_after_normalization;
     use std::path::PathBuf;

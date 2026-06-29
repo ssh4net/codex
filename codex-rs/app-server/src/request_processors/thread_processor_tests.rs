@@ -845,9 +845,11 @@ mod thread_processor_behavior_tests {
                 },
             },
             session_source: SessionSource::Cli,
+            history_mode: Default::default(),
             forked_from_thread_id: None,
             parent_thread_id: None,
             thread_source: None,
+            originator: "test_originator".to_string(),
         };
 
         assert_eq!(

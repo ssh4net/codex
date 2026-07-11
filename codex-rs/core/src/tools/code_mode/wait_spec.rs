@@ -12,7 +12,8 @@ pub(crate) fn create_wait_tool() -> ToolSpec {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding more output. Defaults to 10000 ms.".to_string(),
+                "Wait before yielding more output. Defaults to 10000 ms; lower values are clamped to 10000 ms."
+                    .to_string(),
             )),
         ),
         (
@@ -90,7 +91,7 @@ mod tests {
                         (
                             "yield_time_ms".to_string(),
                             JsonSchema::number(Some(
-                                "Wait before yielding more output. Defaults to 10000 ms."
+                                "Wait before yielding more output. Defaults to 10000 ms; lower values are clamped to 10000 ms."
                                     .to_string(),
                             )),
                         ),

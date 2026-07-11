@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde::Deserializer;
 
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
@@ -20,10 +21,13 @@ use super::wait_spec::create_wait_tool;
 
 pub struct CodeModeWaitHandler;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct ExecWaitArgs {
     cell_id: String,
-    #[serde(default = "default_wait_yield_time_ms")]
+    #[serde(
+        default = "default_wait_yield_time_ms",
+        deserialize_with = "deserialize_wait_yield_time_ms"
+    )]
     yield_time_ms: u64,
     #[serde(default)]
     max_tokens: Option<usize>,
@@ -33,6 +37,13 @@ struct ExecWaitArgs {
 
 fn default_wait_yield_time_ms() -> u64 {
     DEFAULT_WAIT_YIELD_TIME_MS
+}
+
+fn deserialize_wait_yield_time_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(u64::deserialize(deserializer)?.max(DEFAULT_WAIT_YIELD_TIME_MS))
 }
 
 fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
@@ -152,3 +163,7 @@ impl CoreToolRuntime for CodeModeWaitHandler {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "wait_handler_tests.rs"]
+mod tests;

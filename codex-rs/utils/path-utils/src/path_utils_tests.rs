@@ -24,6 +24,8 @@ mod symlinks {
 #[cfg(target_os = "linux")]
 mod wsl {
     use super::super::normalize_for_wsl_with_flag;
+    use super::super::restore_wsl_path_spelling;
+    use super::super::wsl_paths_match_ignoring_case_with_flag;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -50,6 +52,43 @@ mod wsl {
 
         assert_eq!(normalized, path);
     }
+
+    #[test]
+    fn wsl_drive_paths_match_without_canonicalizing() {
+        assert!(wsl_paths_match_ignoring_case_with_flag(
+            PathBuf::from("/mnt/F/GH/Codex").as_path(),
+            PathBuf::from("/mnt/f/gh/codex").as_path(),
+            /*is_wsl*/ true,
+        ));
+        assert!(!wsl_paths_match_ignoring_case_with_flag(
+            PathBuf::from("/mnt/F/GH/Codex").as_path(),
+            PathBuf::from("/mnt/f/gh/other").as_path(),
+            /*is_wsl*/ true,
+        ));
+        assert!(!wsl_paths_match_ignoring_case_with_flag(
+            PathBuf::from("/mnt/F/GH/Codex").as_path(),
+            PathBuf::from("/mnt/f/gh/codex").as_path(),
+            /*is_wsl*/ false,
+        ));
+    }
+
+    #[test]
+    fn restores_case_preserving_spelling_from_directory_entries() -> std::io::Result<()> {
+        if !super::super::env::is_wsl() {
+            return Ok(());
+        }
+        let current_dir = std::env::current_dir()?;
+        if !super::super::is_wsl_case_insensitive_path(&current_dir) {
+            return Ok(());
+        }
+        let temp_dir = tempfile::tempdir_in(current_dir)?;
+        let mixed_case = temp_dir.path().join("MixedCase");
+        std::fs::create_dir(&mixed_case)?;
+        let lower_case = super::super::lower_ascii_path(mixed_case.clone());
+
+        assert_eq!(restore_wsl_path_spelling(lower_case), mixed_case);
+        Ok(())
+    }
 }
 
 mod native_workdir {
@@ -74,28 +113,6 @@ mod native_workdir {
         let path = PathBuf::from(r"\\?\D:\c\x\worktrees\2508\swift-base");
         let normalized =
             normalize_for_native_workdir_with_flag(path.clone(), /*is_windows*/ false);
-
-        assert_eq!(normalized, path);
-    }
-}
-
-mod path_persistence {
-    use super::super::normalize_for_path_persistence;
-    use pretty_assertions::assert_eq;
-    use std::path::PathBuf;
-
-    #[test]
-    fn collapses_current_and_parent_components_without_changing_case() {
-        let normalized =
-            normalize_for_path_persistence(PathBuf::from("/mnt/F/GH/Codex/./child/.."));
-
-        assert_eq!(normalized, PathBuf::from("/mnt/F/GH/Codex"));
-    }
-
-    #[test]
-    fn returns_original_when_normalized_path_would_be_empty() {
-        let path = PathBuf::from(".");
-        let normalized = normalize_for_path_persistence(path.clone());
 
         assert_eq!(normalized, path);
     }

@@ -27,3 +27,25 @@ fn snapshots() {
         (Unknown, Known(&empty)),
     ]));
 }
+
+#[test]
+fn wsl_case_alias_does_not_replace_unchanged_instructions() {
+    if !codex_utils_path::is_wsl() {
+        return;
+    }
+
+    let current = AgentsMdState {
+        instructions: Some(UserInstructions {
+            directory: Some("/mnt/F/GH/Codex".to_string()),
+            text: "use the project formatter".to_string(),
+        }),
+    };
+    let previous = AgentsMdSnapshot {
+        directory: Some("/mnt/f/gh/codex".to_string()),
+        text: Some("use the project formatter".to_string()),
+    };
+
+    assert!(
+        WorldStateSection::render_diff(&current, PreviousSectionState::Known(&previous)).is_none()
+    );
+}

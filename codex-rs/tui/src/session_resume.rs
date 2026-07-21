@@ -161,10 +161,7 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
             CwdPromptOutcome::Exit => ResolveCwdOutcome::Exit,
         });
     }
-    Ok(ResolveCwdOutcome::Continue(Some(cwd_for_resume_or_fork(
-        current_cwd,
-        history_cwd,
-    ))))
+    Ok(ResolveCwdOutcome::Continue(Some(history_cwd)))
 }
 
 async fn read_session_cwd(
@@ -175,12 +172,12 @@ async fn read_session_cwd(
     if let Some(state_db_ctx) = state_db_ctx
         && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
     {
-        return Some(metadata.cwd);
+        return Some(path_utils::restore_wsl_path_spelling(metadata.cwd));
     }
 
     let path = path?;
     match read_rollout_resume_state(path).await {
-        Ok(state) => state.cwd,
+        Ok(state) => state.cwd.map(path_utils::restore_wsl_path_spelling),
         Err(err) => {
             let rollout_path = path.display().to_string();
             tracing::warn!(
@@ -195,14 +192,6 @@ async fn read_session_cwd(
 
 pub(crate) fn cwds_differ(current_cwd: &Path, session_cwd: &Path) -> bool {
     !path_utils::paths_match_after_normalization(current_cwd, session_cwd)
-}
-
-fn cwd_for_resume_or_fork(current_cwd: &Path, history_cwd: PathBuf) -> PathBuf {
-    if path_utils::paths_match_after_normalization(current_cwd, &history_cwd) {
-        current_cwd.to_path_buf()
-    } else {
-        history_cwd
-    }
 }
 
 async fn read_rollout_resume_state(path: &Path) -> io::Result<RolloutResumeState> {
@@ -372,7 +361,6 @@ mod tests {
         assert_eq!(state.cwd, Some(cwd));
         Ok(())
     }
-
     #[tokio::test]
     async fn rollout_resume_state_preserves_legacy_fork_child_context() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;

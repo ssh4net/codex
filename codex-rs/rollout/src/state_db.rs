@@ -14,6 +14,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
 use codex_state::ThreadMetadataBuilder;
+use codex_utils_path::normalize_for_path_comparison;
 use serde_json::Value;
 use std::path::Path;
 use std::path::PathBuf;
@@ -297,7 +298,7 @@ fn cursor_to_anchor(cursor: Option<&Cursor>) -> Option<codex_state::Anchor> {
 }
 
 pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
-    codex_utils_path::normalize_for_path_persistence(cwd)
+    normalize_for_path_comparison(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
 /// List thread ids from SQLite for parity checks without rollout scanning.

@@ -23,6 +23,23 @@ pub(crate) struct AgentsMdSnapshot {
     text: Option<String>,
 }
 
+impl AgentsMdSnapshot {
+    fn matches(&self, other: &Self) -> bool {
+        self.text == other.text
+            && match (&self.directory, &other.directory) {
+                (Some(left), Some(right)) => {
+                    left == right
+                        || codex_utils_path::wsl_paths_match_ignoring_case(
+                            std::path::Path::new(left),
+                            std::path::Path::new(right),
+                        )
+                }
+                (None, None) => true,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+}
+
 impl AgentsMdState {
     pub(crate) fn new(loaded: Option<&LoadedAgentsMd>) -> Self {
         Self {
@@ -54,7 +71,7 @@ impl WorldStateSection for AgentsMdState {
         previous: PreviousSectionState<'_, Self::Snapshot>,
     ) -> Option<Box<dyn ContextualUserFragment>> {
         let current = self.snapshot();
-        if matches!(previous, PreviousSectionState::Known(previous) if previous == &current) {
+        if matches!(previous, PreviousSectionState::Known(previous) if previous.matches(&current)) {
             return None;
         }
 

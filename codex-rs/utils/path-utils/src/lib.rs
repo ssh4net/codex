@@ -15,28 +15,6 @@ pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<
     Ok(normalize_for_wsl(canonical))
 }
 
-/// Normalize cwd-like values before persistence without resolving filesystem
-/// aliases or changing path spelling. User-visible paths should keep their case;
-/// alias-insensitive normalization belongs at comparison sites.
-pub fn normalize_for_path_persistence(path: impl AsRef<Path>) -> PathBuf {
-    let path = path.as_ref();
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        path.to_path_buf()
-    } else {
-        normalized
-    }
-}
-
 /// Compare paths after applying Codex's filesystem normalization.
 ///
 /// If either path cannot be normalized, this falls back to direct path equality.
@@ -48,6 +26,22 @@ pub fn paths_match_after_normalization(left: impl AsRef<Path>, right: impl AsRef
         return left == right;
     }
     left.as_ref() == right.as_ref()
+}
+
+/// Returns whether two WSL-mounted Windows paths differ only by ASCII case.
+///
+/// Unlike [`paths_match_after_normalization`], this does not canonicalize either
+/// path, so symlink aliases remain distinct.
+pub fn wsl_paths_match_ignoring_case(left: impl AsRef<Path>, right: impl AsRef<Path>) -> bool {
+    wsl_paths_match_ignoring_case_with_flag(left.as_ref(), right.as_ref(), env::is_wsl())
+}
+
+/// Restore the case-preserving filesystem spelling of a WSL-mounted Windows path.
+///
+/// This walks directory entries without canonicalizing, so symlink spellings
+/// remain intact. The original path is returned outside WSL or on lookup failure.
+pub fn restore_wsl_path_spelling(path: PathBuf) -> PathBuf {
+    restore_wsl_path_spelling_with_flag(&path, env::is_wsl()).unwrap_or(path)
 }
 
 pub fn normalize_for_native_workdir(path: impl AsRef<Path>) -> PathBuf {
@@ -178,6 +172,65 @@ fn normalize_for_wsl_with_flag(path: PathBuf, is_wsl: bool) -> PathBuf {
     lower_ascii_path(path)
 }
 
+fn wsl_paths_match_ignoring_case_with_flag(left: &Path, right: &Path, is_wsl: bool) -> bool {
+    if !is_wsl || !is_wsl_case_insensitive_path(left) || !is_wsl_case_insensitive_path(right) {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        ascii_eq_ignore_case(left.as_os_str().as_bytes(), right.as_os_str().as_bytes())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn restore_wsl_path_spelling_with_flag(path: &Path, is_wsl: bool) -> Option<PathBuf> {
+    if !is_wsl || !is_wsl_case_insensitive_path(path) {
+        return None;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+
+        let mut restored = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::RootDir => restored.push(component.as_os_str()),
+                Component::Normal(requested) => {
+                    let mut matched = None;
+                    for entry in std::fs::read_dir(&restored).ok()? {
+                        let file_name = entry.ok()?.file_name();
+                        if file_name == requested {
+                            matched = Some(file_name);
+                            break;
+                        }
+                        if ascii_eq_ignore_case(file_name.as_bytes(), requested.as_bytes()) {
+                            if matched.is_some() {
+                                return None;
+                            }
+                            matched = Some(file_name);
+                        }
+                    }
+                    restored.push(matched?);
+                }
+                Component::CurDir | Component::ParentDir | Component::Prefix(_) => return None,
+            }
+        }
+        Some(restored)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 fn is_wsl_case_insensitive_path(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -209,11 +262,7 @@ fn is_wsl_case_insensitive_path(path: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(lhs, rhs)| lhs.to_ascii_lowercase() == *rhs)
+    left.eq_ignore_ascii_case(right)
 }
 
 #[cfg(target_os = "linux")]

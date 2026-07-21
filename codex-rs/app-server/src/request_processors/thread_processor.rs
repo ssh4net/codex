@@ -25,20 +25,6 @@ struct ThreadListFilters {
     relation_filter: Option<StoreThreadRelationFilter>,
 }
 
-fn paths_match(a: &Path, b: &Path) -> bool {
-    path_utils::paths_match_after_normalization(a, b)
-}
-
-fn cwd_with_preferred_spelling(preferred_cwd: &Path, cwd: Option<PathBuf>) -> Option<PathBuf> {
-    cwd.map(|cwd| {
-        if paths_match(preferred_cwd, &cwd) {
-            preferred_cwd.to_path_buf()
-        } else {
-            cwd
-        }
-    })
-}
-
 fn collect_resume_override_mismatches(
     request: &ThreadResumeParams,
     config_snapshot: &ThreadConfigSnapshot,
@@ -71,7 +57,12 @@ fn collect_resume_override_mismatches(
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
         let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if !paths_match(&requested_cwd_path, config_snapshot.cwd().as_path()) {
+        if requested_cwd_path != config_snapshot.cwd().as_path()
+            && !path_utils::wsl_paths_match_ignoring_case(
+                &requested_cwd_path,
+                config_snapshot.cwd().as_path(),
+            )
+        {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
                 requested_cwd_path.display(),
@@ -3147,8 +3138,9 @@ impl ThreadRequestProcessor {
         let needs_paginated_projection =
             paginated_resume && (include_turns || initial_turns_page.is_some());
 
-        let history_cwd =
-            cwd_with_preferred_spelling(&self.config.cwd, thread_history.session_cwd());
+        let history_cwd = thread_history
+            .session_cwd()
+            .map(path_utils::restore_wsl_path_spelling);
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4058,8 +4050,15 @@ impl ThreadRequestProcessor {
             (None, None) => Arc::new(history_items),
             (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
         };
-        let history_cwd =
-            cwd_with_preferred_spelling(&self.config.cwd, Some(source_thread.cwd.clone()));
+        let initial_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::clone(&history_items),
+            rollout_path: source_thread.rollout_path.clone(),
+        });
+        let history_cwd = initial_history
+            .session_cwd()
+            .unwrap_or_else(|| source_thread.cwd.clone());
+        let history_cwd = Some(path_utils::restore_wsl_path_spelling(history_cwd));
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
@@ -4119,11 +4118,7 @@ impl ThreadRequestProcessor {
             .fork_thread_from_history(
                 ForkSnapshot::Interrupted,
                 config,
-                InitialHistory::Resumed(ResumedHistory {
-                    conversation_id: source_thread_id,
-                    history: Arc::clone(&history_items),
-                    rollout_path: source_thread.rollout_path.clone(),
-                }),
+                initial_history,
                 thread_source.map(Into::into),
                 self.request_trace_context(&request_id).await,
                 supports_openai_form_elicitation,

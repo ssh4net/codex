@@ -161,7 +161,10 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
             CwdPromptOutcome::Exit => ResolveCwdOutcome::Exit,
         });
     }
-    Ok(ResolveCwdOutcome::Continue(Some(history_cwd)))
+    Ok(ResolveCwdOutcome::Continue(Some(cwd_for_resume_or_fork(
+        current_cwd,
+        history_cwd,
+    ))))
 }
 
 async fn read_session_cwd(
@@ -192,6 +195,14 @@ async fn read_session_cwd(
 
 pub(crate) fn cwds_differ(current_cwd: &Path, session_cwd: &Path) -> bool {
     !path_utils::paths_match_after_normalization(current_cwd, session_cwd)
+}
+
+fn cwd_for_resume_or_fork(current_cwd: &Path, history_cwd: PathBuf) -> PathBuf {
+    if path_utils::paths_match_after_normalization(current_cwd, &history_cwd) {
+        current_cwd.to_path_buf()
+    } else {
+        history_cwd
+    }
 }
 
 async fn read_rollout_resume_state(path: &Path) -> io::Result<RolloutResumeState> {

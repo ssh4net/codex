@@ -361,6 +361,7 @@ mod tests {
         assert_eq!(state.cwd, Some(cwd));
         Ok(())
     }
+
     #[tokio::test]
     async fn rollout_resume_state_preserves_legacy_fork_child_context() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;

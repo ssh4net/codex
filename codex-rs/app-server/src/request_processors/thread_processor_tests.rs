@@ -738,8 +738,23 @@ mod thread_processor_behavior_tests {
         let cwd = test_path_buf("/tmp").abs();
         let request = ThreadResumeParams {
             thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
             service_tier: Some(Some("priority".to_string())),
-            ..Default::default()
+            cwd: None,
+            runtime_workspace_roots: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            permissions: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            exclude_turns: false,
+            initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
             model: "gpt-5".to_string(),

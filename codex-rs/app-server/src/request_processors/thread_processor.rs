@@ -4650,8 +4650,8 @@ impl ThreadRequestProcessor {
             history: Arc::clone(&source_history_items),
             rollout_path: source_thread.rollout_path.clone(),
         })
-            .session_cwd()
-            .unwrap_or_else(|| source_thread.cwd.clone());
+        .session_cwd()
+        .unwrap_or_else(|| source_thread.cwd.clone());
         let history_cwd = Some(path_utils::restore_wsl_path_spelling(history_cwd));
 
         // Persist Windows sandbox mode.

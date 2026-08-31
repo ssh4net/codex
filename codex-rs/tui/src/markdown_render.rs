@@ -45,6 +45,7 @@ use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
 use crate::style::table_separator_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::LinePrefixPolicy;
 use crate::terminal_hyperlinks::annotate_web_urls_in_line;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::terminal_hyperlinks::visible_lines;
@@ -404,6 +405,7 @@ where
     in_code_block: bool,
     code_block_lang: Option<String>,
     code_block_buffer: String,
+    code_block_prefix_policy: LinePrefixPolicy,
     wrap_width: Option<usize>,
     cwd: Option<PathBuf>,
     is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
@@ -414,6 +416,7 @@ where
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
     current_line_in_code_block: bool,
+    current_line_prefix_policy: LinePrefixPolicy,
     table_state: Option<TableState>,
 }
 
@@ -445,6 +448,7 @@ where
             in_code_block: false,
             code_block_lang: None,
             code_block_buffer: String::new(),
+            code_block_prefix_policy: LinePrefixPolicy::Apply,
             wrap_width,
             cwd: cwd.map(Path::to_path_buf),
             is_hidden_link_destination,
@@ -455,6 +459,7 @@ where
             current_subsequent_indent: Vec::new(),
             current_line_style: Style::default(),
             current_line_in_code_block: false,
+            current_line_prefix_policy: LinePrefixPolicy::Apply,
             table_state: None,
         }
     }
@@ -512,17 +517,7 @@ where
             Tag::Paragraph => self.start_paragraph(),
             Tag::Heading { level, .. } => self.start_heading(level),
             Tag::BlockQuote => self.start_blockquote(),
-            Tag::CodeBlock(kind) => {
-                let indent = match kind {
-                    CodeBlockKind::Fenced(_) => None,
-                    CodeBlockKind::Indented => Some(Span::from(" ".repeat(4))),
-                };
-                let lang = match kind {
-                    CodeBlockKind::Fenced(lang) => Some(lang.to_string()),
-                    CodeBlockKind::Indented => None,
-                };
-                self.start_codeblock(lang, indent)
-            }
+            Tag::CodeBlock(kind) => self.start_codeblock(kind),
             Tag::List(start) => self.start_list(start),
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_inline_style(self.styles.emphasis),
@@ -844,12 +839,21 @@ where
         self.needs_newline = false;
     }
 
-    fn start_codeblock(&mut self, lang: Option<String>, indent: Option<Span<'static>>) {
+    fn start_codeblock(&mut self, kind: CodeBlockKind<'_>) {
         self.flush_current_line();
         if !self.text.is_empty() {
             self.push_blank_line();
         }
         self.in_code_block = true;
+
+        let (lang, indent, prefix_policy) = match kind {
+            CodeBlockKind::Fenced(lang) => (Some(lang.to_string()), None, LinePrefixPolicy::Omit),
+            CodeBlockKind::Indented => (
+                None,
+                Some(Span::from(" ".repeat(4))),
+                LinePrefixPolicy::Apply,
+            ),
+        };
 
         // Extract the language token from the info string.  CommonMark info
         // strings can contain metadata after the language, separated by commas,
@@ -868,6 +872,7 @@ where
             /*marker*/ None,
             /*is_list*/ false,
         ));
+        self.code_block_prefix_policy = prefix_policy;
         self.needs_newline = true;
     }
 
@@ -888,6 +893,7 @@ where
 
         self.needs_newline = true;
         self.in_code_block = false;
+        self.code_block_prefix_policy = LinePrefixPolicy::Apply;
         self.indent_stack.pop();
     }
 
@@ -1917,11 +1923,13 @@ where
                         hyperlink.columns.start + shift..hyperlink.columns.end + shift;
                 }
                 line.line = Line::from_iter(spans);
+                line.prefix_policy = self.current_line_prefix_policy;
                 self.push_output_line(line.style(style));
             }
             self.current_initial_indent.clear();
             self.current_subsequent_indent.clear();
             self.current_line_in_code_block = false;
+            self.current_line_prefix_policy = LinePrefixPolicy::Apply;
             self.line_ends_with_local_link_target = false;
         }
     }
@@ -1968,11 +1976,22 @@ where
         };
         let was_pending = self.pending_marker_line;
 
-        self.current_initial_indent = self.prefix_spans(was_pending);
-        self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
+        let prefix_policy = if self.in_code_block {
+            self.code_block_prefix_policy
+        } else {
+            LinePrefixPolicy::Apply
+        };
+        if prefix_policy == LinePrefixPolicy::Omit {
+            self.current_initial_indent.clear();
+            self.current_subsequent_indent.clear();
+        } else {
+            self.current_initial_indent = self.prefix_spans(was_pending);
+            self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
+        }
         self.current_line_style = style;
         self.current_line_content = Some(HyperlinkLine::new(line));
         self.current_line_in_code_block = self.in_code_block;
+        self.current_line_prefix_policy = prefix_policy;
         self.line_ends_with_local_link_target = false;
 
         self.pending_marker_line = false;

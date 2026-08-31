@@ -7,6 +7,7 @@ mod paragraph;
 
 pub(crate) use paragraph::HyperlinkParagraph;
 
+use std::fmt;
 use std::num::NonZeroU16;
 use std::ops::Range;
 
@@ -81,10 +82,30 @@ impl TerminalHyperlink {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum LinePrefixPolicy {
+    #[default]
+    Apply,
+    Omit,
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct HyperlinkLine {
     pub(crate) line: Line<'static>,
     pub(crate) hyperlinks: Vec<TerminalHyperlink>,
+    pub(crate) prefix_policy: LinePrefixPolicy,
+}
+
+impl fmt::Debug for HyperlinkLine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("HyperlinkLine");
+        debug.field("line", &self.line);
+        debug.field("hyperlinks", &self.hyperlinks);
+        if self.prefix_policy == LinePrefixPolicy::Omit {
+            debug.field("prefix_policy", &self.prefix_policy);
+        }
+        debug.finish()
+    }
 }
 
 impl HyperlinkLine {
@@ -92,6 +113,7 @@ impl HyperlinkLine {
         Self {
             line,
             hyperlinks: Vec::new(),
+            prefix_policy: LinePrefixPolicy::Apply,
         }
     }
 
@@ -159,6 +181,9 @@ pub(crate) fn prefix_hyperlink_lines(
         .into_iter()
         .enumerate()
         .map(|(index, mut line)| {
+            if line.prefix_policy == LinePrefixPolicy::Omit {
+                return line;
+            }
             let prefix = if index == 0 {
                 initial_prefix.clone()
             } else {
@@ -226,6 +251,9 @@ pub(crate) fn remap_wrapped_line(
     wrapped: Vec<Line<'static>>,
 ) -> Vec<HyperlinkLine> {
     let mut out = plain_hyperlink_lines(wrapped);
+    for line in &mut out {
+        line.prefix_policy = source.prefix_policy;
+    }
     if source.hyperlinks.is_empty() {
         return out;
     }
@@ -708,6 +736,7 @@ mod tests {
                 /*columns*/ 0..usize::from(destination.cell_width()),
                 destination.to_string(),
             )],
+            prefix_policy: LinePrefixPolicy::Apply,
         };
 
         assert_eq!(
@@ -773,6 +802,7 @@ mod tests {
                         /*columns*/ 10..14,
                         "https://example.com/first".to_string(),
                     )],
+                    prefix_policy: LinePrefixPolicy::Apply,
                 },
                 HyperlinkLine {
                     line: Line::from("    middle there end"),
@@ -780,6 +810,7 @@ mod tests {
                         /*columns*/ 11..16,
                         "https://example.com/second".to_string(),
                     )],
+                    prefix_policy: LinePrefixPolicy::Apply,
                 },
             ]
         );
@@ -1038,6 +1069,7 @@ mod tests {
         let line = HyperlinkLine {
             line: Line::from("view"),
             hyperlinks: vec![link],
+            prefix_policy: LinePrefixPolicy::Apply,
         };
 
         assert_eq!(

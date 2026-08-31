@@ -4,6 +4,6 @@ expression: "lines.join(\"\\n\")"
 ---
 1. First:
 
-   fn first() {}
+fn first() {}
 
 2. Second:

@@ -2,6 +2,7 @@
 
 use super::markdown_render_cache::MarkdownRenderCache;
 use super::*;
+use crate::terminal_hyperlinks::LinePrefixPolicy;
 use crate::terminal_hyperlinks::annotate_web_urls_in_line;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::wrapping::url_preserving_wrap_options;
@@ -397,6 +398,10 @@ impl HistoryCell for AgentMessageCell {
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let mut wrapped = Vec::new();
         for (index, line) in self.lines.iter().enumerate() {
+            if line.prefix_policy == LinePrefixPolicy::Omit {
+                wrapped.push(line.clone());
+                continue;
+            }
             let initial_indent = if index == 0 && self.is_first_line {
                 "• ".dim().into()
             } else {

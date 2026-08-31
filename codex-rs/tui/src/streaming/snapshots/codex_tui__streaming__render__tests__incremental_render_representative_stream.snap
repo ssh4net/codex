@@ -81,7 +81,6 @@ expression: render.lines
     },
     HyperlinkLine {
         line: Line::from_iter([
-            Span::default(),
             Span::from("fn").fg(Color::Rgb(203, 166, 247)),
             Span::from(" ").fg(Color::Rgb(205, 214, 244)),
             Span::from("main").fg(Color::Rgb(137, 180, 250)),
@@ -92,6 +91,7 @@ expression: render.lines
             Span::from("}").fg(Color::Rgb(147, 153, 178)),
         ]),
         hyperlinks: [],
+        prefix_policy: Omit,
     },
     HyperlinkLine {
         line: Line::default(),

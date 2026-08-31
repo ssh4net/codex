@@ -3077,6 +3077,39 @@ fn agent_markdown_cell_renders_source_at_different_widths() {
 }
 
 #[test]
+fn agent_markdown_cell_renders_fenced_code_without_outer_gutter() {
+    let source =
+        "Run this script:\n\n```python\nif ready:\n    print(\"ready\")\n```\n\nThen continue.\n";
+    let cell = AgentMarkdownCell::new(source.to_string(), &test_cwd());
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+
+    insta::assert_snapshot!(rendered, @r#"
+    • Run this script:
+
+    if ready:
+        print("ready")
+
+      Then continue.
+    "#);
+}
+
+#[test]
+fn agent_markdown_cell_nested_fenced_code_omits_structural_gutter() {
+    let source = "- Example:\n\n  ```python\n  if ready:\n      print(\"ready\")\n  ```\n";
+    let cell = AgentMarkdownCell::new(source.to_string(), &test_cwd());
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+
+    insta::assert_snapshot!(rendered, @r#"
+    • - Example:
+
+    if ready:
+        print("ready")
+    "#);
+}
+
+#[test]
 fn agent_markdown_cell_does_not_split_words_after_inline_markdown() {
     let source = "This paragraph is intentionally long so you can inspect soft wrapping behavior while also checking inline formatting like **bold text**, *italic text*, ***bold italic text***, `inline code`, ~~strikethrough~~, a [link to example.com](https://example.com), and a literal path like [README.md](/Users/felipe.coury/code/codex.fcoury-worktrees/README.md) without introducing manual line breaks.\n";
     let cell = AgentMarkdownCell::new(source.to_string(), &test_cwd());

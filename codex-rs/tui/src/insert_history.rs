@@ -334,6 +334,7 @@ fn write_history_line<W: Write>(
     let merged_line = HyperlinkLine {
         line: Line::from(merged_spans),
         hyperlinks: line.hyperlinks.clone(),
+        prefix_policy: line.prefix_policy,
     };
     let decorated = decorate_spans(&merged_line);
     write_spans(writer, decorated.iter())

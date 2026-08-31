@@ -4,7 +4,7 @@ use crate::render::highlight::MAX_HIGHLIGHT_LINE_BYTES;
 use crate::render::highlight::StreamingCodeHighlighter;
 use crate::render::highlight::syntax_theme_revision;
 use crate::terminal_hyperlinks::HyperlinkLine;
-use ratatui::text::Span;
+use crate::terminal_hyperlinks::LinePrefixPolicy;
 
 /// An append-only fence whose original source is identical to pulldown-cmark's code text.
 pub(super) struct OpenCodeFence {
@@ -96,10 +96,10 @@ impl OpenCodeFence {
         self.source_len = raw_source.len();
         let lines = lines
             .into_iter()
-            .map(|mut line| {
-                // The canonical writer installs an empty indent span for top-level fences.
-                line.spans.insert(/*index*/ 0, Span::default());
-                HyperlinkLine::new(line)
+            .map(|line| {
+                let mut line = HyperlinkLine::new(line);
+                line.prefix_policy = LinePrefixPolicy::Omit;
+                line
             })
             .collect();
         Some((self, lines))

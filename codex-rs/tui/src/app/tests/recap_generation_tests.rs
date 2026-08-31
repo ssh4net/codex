@@ -51,7 +51,8 @@ fn prepare_eligible_recap(app: &mut App, thread_id: ThreadId) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recap_generation_uses_bounded_structured_request_and_inserts_result() -> Result<()> {
+async fn manual_recap_generation_uses_bounded_structured_request_and_inserts_result() -> Result<()>
+{
     let chunks = [
         ev_response_created("recap-response"),
         ev_assistant_message(
@@ -116,13 +117,19 @@ stream_max_retries = 0
     app.handle_event(
         &mut tui,
         &mut app_server,
-        AppEvent::CheckRecap { thread_id },
+        AppEvent::GenerateRecap { thread_id },
     )
     .await?;
-    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
-        .await?
-        .expect("recap start event");
-    assert!(matches!(started_event, AppEvent::RecapStarted { .. }));
+    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let event = app_event_rx.recv().await.expect("app event stream");
+            if matches!(event, AppEvent::RecapStarted { .. }) {
+                break Ok::<_, color_eyre::Report>(event);
+            }
+            app.handle_event(&mut tui, &mut app_server, event).await?;
+        }
+    })
+    .await??;
     app.handle_event(&mut tui, &mut app_server, started_event)
         .await?;
 
@@ -273,6 +280,34 @@ async fn manual_recap_bypasses_automatic_eligibility_and_reports_failure() -> Re
 }
 
 #[tokio::test]
+async fn automatic_recap_generation_is_temporarily_disabled() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    prepare_eligible_recap(&mut app, thread_id);
+    while app_event_rx.try_recv().is_ok() {}
+    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::CheckRecap { thread_id },
+    )
+    .await?;
+    tokio::task::yield_now().await;
+
+    assert!(app_event_rx.try_recv().is_err());
+    assert_eq!(
+        recorded_params(&requests, "thread/start"),
+        Vec::<Value>::new()
+    );
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let remote_cwd = if cfg!(windows) {
@@ -291,7 +326,7 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
             remote_image_urls: Vec::new(),
         }));
 
-    app.request_recap(&app_server, ThreadId::new(), RecapTrigger::Automatic);
+    app.request_recap(&app_server, ThreadId::new(), RecapTrigger::Manual);
     let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
         .await?
         .expect("recap start event");

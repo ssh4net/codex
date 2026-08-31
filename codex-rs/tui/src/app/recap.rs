@@ -218,6 +218,12 @@ impl App {
         thread_id: ThreadId,
         trigger: RecapTrigger,
     ) {
+        // Temporary fork override: keep recap generation manual-only until upstream issue #41622
+        // provides a supported setting for automatic recaps.
+        if matches!(trigger, RecapTrigger::Automatic) {
+            return;
+        }
+
         if self.recap.in_flight_request.is_some() {
             if matches!(trigger, RecapTrigger::Manual) {
                 self.chat_widget

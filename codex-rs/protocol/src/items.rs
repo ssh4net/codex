@@ -133,6 +133,14 @@ pub enum AgentMessageDelivery {
     Async,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AsyncUserInputQuestion {
+    pub title: String,
+    pub options: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 /// Assistant-authored message payload used in turn-item streams.
 ///
@@ -155,6 +163,9 @@ pub struct AgentMessageItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub delivery: Option<AgentMessageDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub questions: Option<Vec<AsyncUserInputQuestion>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -221,8 +232,19 @@ pub fn is_safe_plugin_relative_path(path: &str) -> bool {
         })
 }
 
+/// Immutable model labels carried within command lifecycle events for analytics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationContext {
+    pub model_slug: String,
+    pub reasoning_effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct CommandExecutionItem {
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub model_context: Option<ModelInvocationContext>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

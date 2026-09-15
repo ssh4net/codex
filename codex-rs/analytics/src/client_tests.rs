@@ -146,7 +146,6 @@ fn sample_skill_track_event(thread_id: &str, plugin_id: Option<&str>) -> TrackEv
             skill_scope: None,
             plugin_id: plugin_id.map(str::to_string),
             remote_plugin_id: None,
-            repo_url: None,
             thread_id: Some(thread_id.to_string()),
             turn_id: Some("turn-1".to_string()),
             invoke_type: Some(InvocationType::Explicit),
@@ -217,6 +216,7 @@ fn sample_mcp_tool_call_event(thread_id: &str, plugin_id: Option<&str>) -> Track
                 subagent_source: None,
                 parent_thread_id: None,
                 tool_name: "search".to_string(),
+                tool_event_type: None,
                 started_at_ms: 1,
                 completed_at_ms: 2,
                 duration_ms: Some(1),
@@ -421,9 +421,12 @@ async fn api_key_auth_sends_only_plugin_events_to_codex_backend() {
         TrackEventRequest::PluginMeasurement(CodexPluginMeasurementEventRequest {
             event_type: "codex_plugin_measurement_event",
             event_params: CodexPluginMeasurementEventParams {
+                model_slug: None,
+                reasoning_effort: None,
                 thread_id: thread_id.to_string(),
                 turn_id: "turn-1".to_string(),
                 item_id: "item-1".to_string(),
+                originator: "codex_cli_rs".to_string(),
                 plugin_id: plugin_id.to_string(),
                 execution_id: "execution-1".to_string(),
                 operation: "security_scan".to_string(),
@@ -588,6 +591,8 @@ fn sample_thread_archive_request() -> ClientRequest {
 
 fn sample_thread(thread_id: &str) -> Thread {
     Thread {
+        originator: None,
+        environments: None,
         id: thread_id.to_string(),
         extra: None,
         session_id: format!("session-{thread_id}"),
@@ -598,8 +603,11 @@ fn sample_thread(thread_id: &str) -> Thread {
         section: None,
         section_entered_at: None,
         project_id: None,
+        daybreak_enabled: None,
         history_mode: Default::default(),
         model_provider: "openai".to_string(),
+        model: None,
+        reasoning_effort: None,
         created_at: 1,
         updated_at: 2,
         recency_at: Some(2),
@@ -620,6 +628,7 @@ fn sample_thread(thread_id: &str) -> Thread {
 
 fn sample_thread_start_response() -> ClientResponsePayload {
     ClientResponsePayload::ThreadStart(ThreadStartResponse {
+        disabled_plugin_ids: Vec::new(),
         thread: sample_thread("thread-1"),
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
@@ -638,6 +647,7 @@ fn sample_thread_start_response() -> ClientResponsePayload {
 
 fn sample_thread_resume_response() -> ClientResponsePayload {
     ClientResponsePayload::ThreadResume(ThreadResumeResponse {
+        disabled_plugin_ids: Vec::new(),
         thread: sample_thread("thread-2"),
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
@@ -650,6 +660,7 @@ fn sample_thread_resume_response() -> ClientResponsePayload {
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        collaboration_mode: None,
         multi_agent_mode: Default::default(),
         initial_turns_page: None,
         turns_backwards_cursor: None,
@@ -659,6 +670,7 @@ fn sample_thread_resume_response() -> ClientResponsePayload {
 
 fn sample_thread_fork_response() -> ClientResponsePayload {
     ClientResponsePayload::ThreadFork(ThreadForkResponse {
+        disabled_plugin_ids: Vec::new(),
         thread: sample_thread("thread-3"),
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
@@ -703,6 +715,9 @@ fn track_plugin_measurements_rejects_unbounded_inputs_before_queueing() {
         thread_id: "thread-1".to_string(),
         turn_id: "turn-1".to_string(),
         item_id: "item-1".to_string(),
+        originator: "codex_cli_rs".to_string(),
+        model_slug: None,
+        reasoning_effort: None,
         plugin_id: "sample@openai-curated".to_string(),
         execution_id: "execution-1".to_string(),
         operation: "security_scan".to_string(),

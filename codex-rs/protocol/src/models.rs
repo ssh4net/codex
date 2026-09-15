@@ -32,15 +32,21 @@ use crate::ResponseItemId;
 use crate::mcp::CallToolResult;
 use codex_utils_path_uri::PathUri;
 
+mod configuration_update;
 mod executed_tool_calls;
 mod item_metadata;
 
 pub use crate::local_media::MAX_PROMPT_AUDIO_INPUT_BYTES;
 pub use crate::local_media::snapshot_local_user_input;
 pub use crate::permission_profile_snapshot::PermissionProfileSnapshot;
+pub use configuration_update::ConfigurationReasoning;
 pub use executed_tool_calls::ExecutedToolCall;
 pub use executed_tool_calls::ExecutedToolCallArguments;
 pub use executed_tool_calls::ExecutedToolCallTruncation;
+pub use executed_tool_calls::MAX_TOOL_RESULT_SOURCE_FIELD_BYTES;
+pub use executed_tool_calls::ToolResultMetadata;
+pub use executed_tool_calls::ToolResultSource;
+pub use executed_tool_calls::ToolResultSources;
 pub use executed_tool_calls::bound_executed_tool_calls_for_prompt;
 pub use executed_tool_calls::bound_executed_tool_calls_for_prompt_prioritizing_recent;
 pub use executed_tool_calls::executed_tool_call_metadata_bytes;
@@ -545,6 +551,24 @@ impl PermissionProfile {
         }
     }
 
+    /// Legacy workspace-write settings interpreted for executor-owned paths.
+    pub fn workspace_write_with_path_uris(
+        writable_roots: &[PathUri],
+        network: NetworkSandboxPolicy,
+        exclude_tmpdir_env_var: bool,
+        exclude_slash_tmp: bool,
+    ) -> Self {
+        let file_system = FileSystemSandboxPolicy::workspace_write_with_path_uris(
+            writable_roots,
+            exclude_tmpdir_env_var,
+            exclude_slash_tmp,
+        );
+        Self::Managed {
+            file_system: ManagedFileSystemPermissions::from_sandbox_policy(&file_system),
+            network,
+        }
+    }
+
     pub fn materialize_project_roots_with_workspace_roots(
         self,
         workspace_roots: &[AbsolutePathBuf],
@@ -855,7 +879,8 @@ pub enum ContentItem {
         text: String,
     },
     InputImage {
-        image_url: String,
+        #[serde(flatten)]
+        image: ImageReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         detail: Option<ImageDetail>,
@@ -866,6 +891,13 @@ pub enum ContentItem {
     OutputText {
         text: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(untagged)]
+pub enum ImageReference {
+    Inline { image_url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
@@ -937,7 +969,8 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub content_item_kinds: Option<Vec<ContentItemKind>>,
-    // Ignore input values so requests cannot fake tool call records.
+    // Ignore input values so requests and rollout reloads cannot fake tool call records.
+    // A resumed thread can record new calls, but cannot prove old calls from this payload.
     /// Host-owned Code Mode cell shared by its `exec` and subsequent `wait` outputs.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -948,8 +981,9 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub executed_tool_calls: Option<Vec<ExecutedToolCall>>,
-    /// Whether the host finished recording this cell's calls without losing calls or arguments.
-    /// This describes the call inventory across the cell's outputs, not tool success.
+    /// Whether the host recorded the complete call inventory without losing calls or arguments.
+    /// For a direct tool output this covers its single invocation; with `cell_id`, it covers
+    /// the Code Mode cell across its outputs. Neither case describes tool success.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     #[ts(skip)]
@@ -1197,6 +1231,10 @@ pub enum ResponseItem {
         #[ts(optional)]
         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     },
+    /// A durable input control interpreted by the backend at its position in history.
+    ConfigurationUpdate {
+        reasoning: ConfigurationReasoning,
+    },
     // Compaction triggers are request controls, not durable response items.
     CompactionTrigger {},
     ContextCompaction {
@@ -1238,7 +1276,7 @@ impl ResponseItem {
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
             | Self::ContextCompaction { id, .. } => id.as_ref(),
-            Self::CompactionTrigger { .. } | Self::Other => None,
+            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
         }
     }
 
@@ -1260,7 +1298,7 @@ impl ResponseItem {
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
             | Self::ContextCompaction { id, .. } => *id = new_id,
-            Self::CompactionTrigger { .. } | Self::Other => {}
+            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => {}
         }
     }
 
@@ -1281,7 +1319,7 @@ impl ResponseItem {
             Self::WebSearchCall { .. } => Some("ws"),
             Self::ImageGenerationCall { .. } => Some("ig"),
             Self::Compaction { .. } | Self::ContextCompaction { .. } => Some("cmp"),
-            Self::CompactionTrigger { .. } | Self::Other => None,
+            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
         }
     }
 
@@ -1416,7 +1454,10 @@ impl ResponseItem {
                 internal_chat_message_metadata_passthrough: metadata,
                 ..
             } => metadata.as_ref(),
-            Self::CompactionTrigger { .. } | Self::AdditionalTools { .. } | Self::Other => None,
+            Self::ConfigurationUpdate { .. }
+            | Self::CompactionTrigger { .. }
+            | Self::AdditionalTools { .. }
+            | Self::Other => None,
         }
     }
 
@@ -1480,7 +1521,10 @@ impl ResponseItem {
                 internal_chat_message_metadata_passthrough: metadata,
                 ..
             } => Some(metadata),
-            Self::CompactionTrigger { .. } | Self::AdditionalTools { .. } | Self::Other => None,
+            Self::ConfigurationUpdate { .. }
+            | Self::CompactionTrigger { .. }
+            | Self::AdditionalTools { .. }
+            | Self::Other => None,
         }
     }
 }
@@ -1807,7 +1851,7 @@ fn local_image_content_items(
         });
     }
     items.push(ContentItem::InputImage {
-        image_url,
+        image: ImageReference::Inline { image_url },
         detail: Some(detail),
     });
     if label_number.is_some() {
@@ -1970,7 +2014,7 @@ impl ResponseInputItem {
                         image_index += 1;
                         let detail = detail.unwrap_or(DEFAULT_IMAGE_DETAIL);
                         vec![ContentItem::InputImage {
-                            image_url,
+                            image: ImageReference::Inline { image_url },
                             detail: Some(detail),
                         }]
                     }
@@ -2044,7 +2088,8 @@ pub enum FunctionCallOutputContentItem {
     },
     // Do not rename, these are serialized and used directly in the responses API.
     InputImage {
-        image_url: String,
+        #[serde(flatten)]
+        image: ImageReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         detail: Option<ImageDetail>,
@@ -2102,7 +2147,7 @@ impl From<crate::dynamic_tools::DynamicToolCallOutputContentItem>
             }
             crate::dynamic_tools::DynamicToolCallOutputContentItem::InputImage { image_url } => {
                 Self::InputImage {
-                    image_url,
+                    image: ImageReference::Inline { image_url },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 }
             }
@@ -2347,7 +2392,7 @@ fn convert_mcp_content_to_items(
                     format!("data:{mime_type};base64,{data}")
                 };
                 FunctionCallOutputContentItem::InputImage {
-                    image_url,
+                    image: ImageReference::Inline { image_url },
                     detail: meta
                         .as_ref()
                         .and_then(serde_json::Value::as_object)
@@ -2620,7 +2665,9 @@ mod tests {
         assert_eq!(
             content_item,
             ContentItem::InputImage {
-                image_url: "data:image/png;base64,abc".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                },
                 detail: Some(ImageDetail::Auto),
             }
         );
@@ -2675,7 +2722,9 @@ mod tests {
         assert_eq!(
             items,
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,Zm9v".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,Zm9v".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             }]
         );
@@ -3007,7 +3056,9 @@ mod tests {
         assert_eq!(
             items,
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,Zm9v".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,Zm9v".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             }]
         );
@@ -3064,7 +3115,9 @@ mod tests {
                 text: "line 1".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,AAA".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputText {
@@ -3083,7 +3136,9 @@ mod tests {
                 text: "   ".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,AAA".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputAudio {
@@ -3112,7 +3167,9 @@ mod tests {
                 text: "line 1".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,AAA".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ]);
@@ -3387,7 +3444,9 @@ mod tests {
                     text: "caption".into(),
                 },
                 FunctionCallOutputContentItem::InputImage {
-                    image_url: "data:image/png;base64,BASE64".into(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,BASE64".into(),
+                    },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 },
             ]
@@ -3462,7 +3521,9 @@ mod tests {
             name: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::InputImage {
-                    image_url: "data:image/png;base64,BASE64".into(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,BASE64".into(),
+                    },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 },
             ]),
@@ -3527,7 +3588,9 @@ mod tests {
         assert_eq!(
             items,
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,BASE64".into(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,BASE64".into(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             }]
         );
@@ -3559,7 +3622,9 @@ mod tests {
         assert_eq!(
             items,
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,BASE64".into(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,BASE64".into(),
+                },
                 detail: Some(ImageDetail::Original),
             }]
         );
@@ -3591,7 +3656,9 @@ mod tests {
         assert_eq!(
             items,
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,BASE64".into(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,BASE64".into(),
+                },
                 detail: Some(ImageDetail::High),
             }]
         );
@@ -3614,7 +3681,9 @@ mod tests {
                 text: "note".into(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,XYZ".into(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,XYZ".into(),
+                },
                 detail: None,
             },
         ];
@@ -3823,7 +3892,7 @@ mod tests {
         match item {
             ResponseInputItem::Message { content, .. } => {
                 let expected = vec![ContentItem::InputImage {
-                    image_url,
+                    image: ImageReference::Inline { image_url },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 }];
                 assert_eq!(content, expected);
@@ -3969,7 +4038,7 @@ mod tests {
                 assert_eq!(
                     content.first(),
                     Some(&ContentItem::InputImage {
-                        image_url,
+                        image: ImageReference::Inline { image_url },
                         detail: Some(ImageDetail::Original),
                     })
                 );
@@ -4172,7 +4241,7 @@ mod tests {
                 assert_eq!(
                     content.first(),
                     Some(&ContentItem::InputImage {
-                        image_url,
+                        image: ImageReference::Inline { image_url },
                         detail: Some(DEFAULT_IMAGE_DETAIL),
                     })
                 );

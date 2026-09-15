@@ -60,6 +60,7 @@ use crate::events::ThreadArchiveEvent;
 use crate::events::ThreadArchiveEventParams;
 use crate::events::ThreadInitializedEvent;
 use crate::events::ThreadInitializedEventParams;
+use crate::events::ToolEventType;
 use crate::events::ToolItemFailureKind;
 use crate::events::ToolItemTerminalStatus;
 use crate::events::TrackEventRequest;
@@ -113,6 +114,9 @@ use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRejectionReason;
 use crate::facts::TurnSteerResult;
 use crate::facts::TurnTokenUsageFact;
+use crate::guardian_v2::GuardianV2EventKind;
+use crate::guardian_v2::GuardianV2EventParams;
+use crate::guardian_v2::GuardianV2EventRequest;
 use crate::now_unix_millis;
 use crate::now_unix_seconds;
 use crate::option_i64_to_u64;
@@ -156,6 +160,7 @@ use codex_login::default_client::originator;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::items::is_safe_plugin_relative_path;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SessionSource;
@@ -200,7 +205,7 @@ pub(crate) struct AnalyticsReducer {
     turns: HashMap<String, TurnState>,
     connections: HashMap<u64, ConnectionState>,
     threads: HashMap<String, ThreadAnalyticsState>,
-    tool_items_started_at_ms: HashMap<ToolItemKey, u64>,
+    tool_items_started_at_ms: HashMap<ToolItemKey, (u64, Option<ModelInvocationContext>)>,
     tool_response_states: HashMap<(String, String), ToolResponseState>,
     code_mode_cells: HashMap<String, HashMap<String, CodeModeCellState>>,
     pending_reviews: HashMap<RequestId, PendingReviewState>,
@@ -617,6 +622,68 @@ impl AnalyticsReducer {
                 }
                 CustomAnalyticsFact::Goal(input) => {
                     self.ingest_goal(*input, out);
+                }
+                CustomAnalyticsFact::ThreadHintStatus(input) => {
+                    if let Some((connection, thread, metadata)) =
+                        self.thread_context_or_warn(AnalyticsDropSite {
+                            event_name: "codex_thread_hint_status",
+                            thread_id: &input.thread_id,
+                            turn_id: None,
+                            review_id: None,
+                            item_id: None,
+                        })
+                    {
+                        out.push(TrackEventRequest::ThreadHintStatus(Box::new(
+                            crate::thread_hint::ThreadHintStatusEventRequest {
+                                event_type: "codex_thread_hint_status",
+                                event_params: crate::thread_hint::ThreadHintStatusEventParams {
+                                    thread_id: input.thread_id,
+                                    session_id: metadata.session_id.clone(),
+                                    app_server_client: thread.app_server_client(connection),
+                                    runtime: connection.runtime.clone(),
+                                    thread_source: metadata.thread_source.clone(),
+                                    subagent_source: metadata.subagent_source.clone(),
+                                    parent_thread_id: metadata.parent_thread_id.clone(),
+                                    status: input.status,
+                                    occurred_at_ms: input.occurred_at_ms,
+                                },
+                            },
+                        )));
+                    }
+                }
+                CustomAnalyticsFact::GuardianV2(input) => {
+                    let event_type = match &input.kind {
+                        GuardianV2EventKind::Classification { .. } => {
+                            "codex_guardian_v2_classification"
+                        }
+                        GuardianV2EventKind::FastDecision { .. } => {
+                            "codex_guardian_v2_fast_decision"
+                        }
+                    };
+                    if let Some((connection, thread, metadata)) =
+                        self.thread_context_or_warn(AnalyticsDropSite {
+                            event_name: event_type,
+                            thread_id: &input.thread_id,
+                            turn_id: Some(&input.turn_id),
+                            review_id: None,
+                            item_id: input.item_id.as_deref(),
+                        })
+                    {
+                        out.push(TrackEventRequest::GuardianV2(Box::new(
+                            GuardianV2EventRequest {
+                                event_type,
+                                event_params: GuardianV2EventParams {
+                                    session_id: metadata.session_id.clone(),
+                                    app_server_client: thread.app_server_client(connection),
+                                    runtime: connection.runtime.clone(),
+                                    thread_source: metadata.thread_source.clone(),
+                                    subagent_source: metadata.subagent_source.clone(),
+                                    parent_thread_id: metadata.parent_thread_id.clone(),
+                                    guardian_v2: *input,
+                                },
+                            },
+                        )));
+                    }
                 }
                 CustomAnalyticsFact::GuardianReview(input) => {
                     self.ingest_guardian_review(*input, out);
@@ -1218,7 +1285,7 @@ impl AnalyticsReducer {
             invocations,
         } = input;
         for invocation in invocations {
-            let (skill_id, repo_url, skill_scope) = match invocation.location {
+            let (skill_id, skill_scope) = match invocation.location {
                 SkillInvocationLocation::Host { path, scope } => {
                     let skill_scope = match scope {
                         SkillScope::User => "user",
@@ -1240,7 +1307,7 @@ impl AnalyticsReducer {
                         path.as_path(),
                         invocation.skill_name.as_str(),
                     );
-                    (skill_id, repo_url, Some(skill_scope.to_string()))
+                    (skill_id, Some(skill_scope.to_string()))
                 }
                 SkillInvocationLocation::Resource {
                     id,
@@ -1263,7 +1330,7 @@ impl AnalyticsReducer {
                             SkillScope::Admin => "admin",
                         })
                         .map(str::to_owned);
-                    (skill_id, None, skill_scope)
+                    (skill_id, skill_scope)
                 }
             };
             out.push(TrackEventRequest::SkillInvocation(
@@ -1277,7 +1344,6 @@ impl AnalyticsReducer {
                         invoke_type: Some(invocation.invocation_type),
                         model_slug: Some(tracking.model_slug.clone()),
                         product_client_id: Some(tracking.product_client_id.clone()),
-                        repo_url: repo_url.map(String::from),
                         skill_scope,
                         plugin_id: invocation.plugin_id,
                         remote_plugin_id: invocation.remote_plugin_id,
@@ -1827,14 +1893,18 @@ impl AnalyticsReducer {
                 else {
                     return;
                 };
-                self.tool_items_started_at_ms.insert(
-                    ToolItemKey {
+                let model_context = match &notification.item {
+                    ThreadItem::CommandExecution { model_context, .. } => model_context.clone(),
+                    _ => None,
+                };
+                self.tool_items_started_at_ms
+                    .entry(ToolItemKey {
                         thread_id: notification.thread_id,
                         turn_id: notification.turn_id,
                         item_id: item_id.to_string(),
-                    },
-                    started_at_ms,
-                );
+                    })
+                    .and_modify(|(timestamp, _)| *timestamp = started_at_ms)
+                    .or_insert((started_at_ms, model_context));
             }
             ServerNotification::ItemCompleted(notification) => {
                 if matches!(notification.item, ThreadItem::SubAgentActivity { .. }) {
@@ -1867,7 +1937,9 @@ impl AnalyticsReducer {
                     turn_id: notification.turn_id.clone(),
                     item_id: item_id.to_string(),
                 };
-                let Some(started_at_ms) = self.tool_items_started_at_ms.remove(&key) else {
+                let Some((started_at_ms, model_context)) =
+                    self.tool_items_started_at_ms.remove(&key)
+                else {
                     tracing::warn!(
                         thread_id = %notification.thread_id,
                         turn_id = %notification.turn_id,
@@ -1889,6 +1961,7 @@ impl AnalyticsReducer {
                     thread_id: &notification.thread_id,
                     turn_id: &notification.turn_id,
                     item: &notification.item,
+                    model_context: model_context.as_ref(),
                     started_at_ms,
                     completed_at_ms,
                     connection_state,
@@ -1901,12 +1974,20 @@ impl AnalyticsReducer {
                         .get(&notification.turn_id)
                         .and_then(|turn| turn.resolved_config.as_ref())
                         .and_then(|config| config.turn_metadata.root_turn_id());
+                    // Fast collaborator tools can complete before their sampling response.
+                    // Keep the event until that response can supply its originating ID.
+                    let emission =
+                        if matches!(&notification.item, ThreadItem::CollabAgentToolCall { .. }) {
+                            ToolEventEmission::AwaitResponse
+                        } else {
+                            ToolEventEmission::ImmediateUnlessCorrelated
+                        };
                     self.record_tool_event(
                         &notification.thread_id,
                         &notification.turn_id,
                         root_turn_id,
                         event,
-                        ToolEventEmission::ImmediateUnlessCorrelated,
+                        emission,
                         out,
                     );
                 }
@@ -1990,6 +2071,9 @@ impl AnalyticsReducer {
             thread_id,
             turn_id,
             item_id,
+            originator,
+            model_slug,
+            reasoning_effort,
             plugin_id,
             execution_id,
             operation,
@@ -2005,6 +2089,9 @@ impl AnalyticsReducer {
                             thread_id: thread_id.clone(),
                             turn_id: turn_id.clone(),
                             item_id: item_id.clone(),
+                            originator: originator.clone(),
+                            model_slug: model_slug.clone(),
+                            reasoning_effort: reasoning_effort.clone(),
                             plugin_id: plugin_id.clone(),
                             execution_id: execution_id.clone(),
                             operation: operation.clone(),
@@ -2027,6 +2114,11 @@ impl AnalyticsReducer {
         out: &mut Vec<TrackEventRequest>,
     ) {
         let session_source: SessionSource = thread.source.into();
+        let is_worktree =
+            codex_git_utils::repository_identity(thread.cwd.as_path()).and_then(|_| {
+                codex_git_utils::get_git_repo_root(thread.cwd.canonicalize().ok()?.as_path())
+                    .map(|root| root.join(".git").is_file())
+            });
         let session_id = thread.session_id;
         let thread_id = thread.id;
         let parent_thread_id = thread.parent_thread_id;
@@ -2058,6 +2150,7 @@ impl AnalyticsReducer {
                     runtime: connection_state.runtime.clone(),
                     model,
                     ephemeral: thread.ephemeral,
+                    is_worktree,
                     thread_source: thread_metadata.thread_source,
                     initialization_mode,
                     subagent_source: thread_metadata.subagent_source.clone(),
@@ -2477,6 +2570,16 @@ fn enrich_tool_response_event(
     let Some(base) = tool_event_base_mut(event) else {
         return;
     };
+    // A cell association can also describe a separately sampled wait call. Classify
+    // only from evidence about this exact call ID, not its parent or response lineage.
+    base.tool_event_type = match (
+        state.response_ids_by_call_id.contains_key(&base.item_id),
+        state.cell_ids_by_child_call_id.contains_key(&base.item_id),
+    ) {
+        (true, false) => Some(ToolEventType::ModelToolCall),
+        (false, true) => Some(ToolEventType::InnerToolCall),
+        (false, false) | (true, true) => None,
+    };
     if base.cell_id.is_none() {
         base.cell_id = state.cell_ids_by_child_call_id.get(&base.item_id).cloned();
     }
@@ -2518,6 +2621,7 @@ struct ToolItemEventInput<'a> {
     thread_id: &'a str,
     turn_id: &'a str,
     item: &'a ThreadItem,
+    model_context: Option<&'a ModelInvocationContext>,
     started_at_ms: u64,
     completed_at_ms: u64,
     connection_state: &'a ConnectionState,
@@ -2531,6 +2635,7 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
         thread_id,
         turn_id,
         item,
+        model_context,
         started_at_ms,
         completed_at_ms,
         connection_state,
@@ -2575,6 +2680,9 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
                 CodexCommandExecutionEventRequest {
                     event_type: "codex_command_execution_event",
                     event_params: CodexCommandExecutionEventParams {
+                        model_slug: model_context.map(|context| context.model_slug.clone()),
+                        reasoning_effort: model_context
+                            .and_then(|context| context.reasoning_effort.clone()),
                         base,
                         plugin_id: plugin_id.clone(),
                         script_path: safe_plugin_relative_script_path(
@@ -2851,6 +2959,7 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
                         saved_path_present: item.saved_path.is_some(),
                         transparent_background: item.transparent_background,
                         imagegen_request_id: item.imagegen_request_id.clone(),
+                        generation_id: item.generation_id.clone(),
                     },
                 },
             ))
@@ -2936,6 +3045,7 @@ fn tool_item_base(
         subagent_source: thread_metadata.subagent_source.clone(),
         parent_thread_id: thread_metadata.parent_thread_id.clone(),
         tool_name,
+        tool_event_type: None,
         started_at_ms: context.started_at_ms,
         completed_at_ms: context.completed_at_ms,
         // duration_ms reflects item lifecycle observed by app-server. For web
@@ -3403,6 +3513,7 @@ fn codex_turn_event_params(
         service_tier,
         approval_policy,
         approvals_reviewer,
+        guardian_v2_enabled,
         sandbox_network_access,
         collaboration_mode,
         personality,
@@ -3426,6 +3537,8 @@ fn codex_turn_event_params(
         session_id: thread_metadata.session_id.clone(),
         turn_id,
         root_turn_id: turn_metadata.root_turn_id(),
+        turn_trigger: turn_metadata.turn_trigger(),
+        codex_turn_source: turn_metadata.codex_turn_source(),
         app_server_client,
         runtime,
         submission_type,
@@ -3447,6 +3560,7 @@ fn codex_turn_event_params(
             .unwrap_or_else(|| "default".to_string()),
         approval_policy: approval_policy.to_string(),
         approvals_reviewer: approvals_reviewer.to_string(),
+        guardian_v2_enabled,
         sandbox_network_access,
         collaboration_mode: Some(collaboration_mode_mode(collaboration_mode)),
         personality: personality_mode(personality),

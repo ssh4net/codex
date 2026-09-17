@@ -24,6 +24,7 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_guardian_context::truncate_text as truncate_entry;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -31,6 +32,7 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -71,7 +73,7 @@ use crate::async_scorer::authorization::ScoreAuthorization;
 use crate::async_scorer::config::CLASSIFICATION_OUTPUT_INSTRUCTIONS;
 use crate::async_scorer::config::DEFAULT_PARENT_COMPACTION_TOKENS;
 use crate::async_scorer::config::GuardianV2Config;
-use crate::async_scorer::coverage::GuardianPolicy;
+use crate::async_scorer::coverage::scores_tool;
 use crate::async_scorer::metrics::CLASSIFICATION_DURATION_METRIC;
 use crate::async_scorer::metrics::CLASSIFICATION_METRIC;
 use crate::async_scorer::metrics::CLASSIFICATION_RISK_METRIC;
@@ -87,8 +89,8 @@ use crate::async_scorer::sampler::tests::proxy_websocket_servers_with_http;
 use crate::async_scorer::score::GuardianV2ScoreProgress;
 use crate::async_scorer::transcript::MAX_MESSAGE_ENTRY_TOKENS;
 use crate::async_scorer::transcript::MAX_TOOL_ENTRY_TOKENS;
-use crate::async_scorer::transcript::truncate_entry;
 use codex_features::GuardianV2ReviewScopeConfigToml;
+use codex_protocol::openai_models::GuardianModelPolicy;
 
 const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";
@@ -110,8 +112,31 @@ impl ExternalAuth for RefreshableAuth {
     }
 }
 
-fn should_classify_tool(tool: &ToolName, payload: &ToolPayload, policy: GuardianPolicy) -> bool {
-    policy.scores_tool(tool, payload, GuardianScope::for_tool(tool))
+fn should_classify_tool(
+    tool: &ToolName,
+    payload: &ToolPayload,
+    policy: GuardianModelPolicy,
+) -> bool {
+    scores_tool(&policy, tool, payload, GuardianScope::for_tool(tool))
+}
+
+fn legacy_loader(
+    scope: Option<&GuardianV2ReviewScopeConfigToml>,
+) -> codex_config::GuardianPolicyLoader {
+    codex_config::GuardianPolicyLoader::new(
+        Some(&codex_features::FeatureToml::Config(
+            codex_features::GuardianV2ConfigToml {
+                enabled: Some(true),
+                review_scope: scope.cloned(),
+                ..Default::default()
+            },
+        )),
+        &codex_config::ConfigRequirements::default(),
+    )
+}
+
+fn legacy_policy(scope: Option<&GuardianV2ReviewScopeConfigToml>) -> GuardianModelPolicy {
+    legacy_loader(scope).resolve(/*model*/ None)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -411,11 +436,23 @@ struct TestRetainedHistory {
     current: TestConversationHistory,
     retained: Vec<ResponseItem>,
     compaction_model_hash: Option<String>,
+    retained_context: Option<codex_history::RetainedContext>,
 }
 
 impl ConversationHistorySnapshot for TestRetainedHistory {
-    fn latest_compaction_model_hash(&self) -> Option<&str> {
-        self.compaction_model_hash.as_deref()
+    fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
+        self.retained_context.as_ref()
+    }
+
+    fn latest_compaction(&self) -> Option<codex_history::CompactionCheckpoint<'_>> {
+        self.items()
+            .filter_map(|item| {
+                codex_history::CompactionCheckpoint::from_item(
+                    item,
+                    self.compaction_model_hash.as_deref(),
+                )
+            })
+            .last()
     }
     fn history_version(&self) -> u64 {
         self.current.history_version()
@@ -462,7 +499,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
     };
 
     let tool_name = ToolName::plain("exec_command");
-    let standard_scope = GuardianPolicy::from_legacy(Some(&GuardianV2ReviewScopeConfigToml {
+    let standard_scope = legacy_policy(Some(&GuardianV2ReviewScopeConfigToml {
         computer_use_only: Some(false),
         sandboxed_exec_commands: Some(false),
     }));
@@ -484,7 +521,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
     assert!(should_classify_tool(
         &tool_name,
         &sandboxed,
-        GuardianPolicy::from_legacy(Some(&GuardianV2ReviewScopeConfigToml {
+        legacy_policy(Some(&GuardianV2ReviewScopeConfigToml {
             computer_use_only: Some(false),
             sandboxed_exec_commands: Some(true),
         })),
@@ -575,16 +612,14 @@ fn computer_use_only_classification_recognizes_direct_and_code_mode_tools() {
         (ToolName::namespaced("mcp__cua_repl__", "js"), true),
         (ToolName::plain("mcp__node_repl__js"), true),
         (ToolName::plain("mcp__cua_repl__js"), true),
+        (ToolName::plain("exec"), false),
+        (ToolName::namespaced("mcp__ordinary__", "exec"), false),
         (ToolName::namespaced("mcp__ordinary__", "js"), false),
         (ToolName::plain("read_file"), false),
         (ToolName::plain("exec_command"), false),
     ] {
         assert_eq!(
-            should_classify_tool(
-                &tool_name,
-                &payload,
-                GuardianPolicy::from_legacy(/*scope*/ None)
-            ),
+            should_classify_tool(&tool_name, &payload, legacy_policy(/*scope*/ None)),
             expected,
             "unexpected classification scope for {tool_name}"
         );
@@ -605,7 +640,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
         .expect("Guardian v2 should have initialized")
         .as_ref()
         .clone();
-    config.policy = GuardianPolicy::from_legacy(/*scope*/ None);
+    config.policy = legacy_loader(/*scope*/ None);
     thread_store.insert(config);
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
@@ -975,7 +1010,7 @@ struct GuardianFailureFixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disabled_code_mode_invalidates_cached_scores() -> Result<()> {
+async fn unscored_tools_invalidate_cached_scores() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let fixture = GuardianFailureFixture::new().await?;
     let thread_store = fixture.test.codex.thread_extension_data();
@@ -1004,25 +1039,25 @@ async fn disabled_code_mode_invalidates_cached_scores() -> Result<()> {
         ),
         before,
     );
-    fixture.score_tool(ToolName::plain("exec")).await;
-    assert_eq!(
-        (
-            progress.latest_tool_call.load(Ordering::Acquire),
-            progress.latest_failed_tool_call.load(Ordering::Acquire),
-        ),
-        (before.0 + 1, before.0 + 1),
-    );
-    // An MCP tool with the same name remains in the MCP category.
-    fixture
-        .score_tool(ToolName::namespaced("mcp__ordinary", "wait"))
-        .await;
-    assert_eq!(
-        (
-            progress.latest_tool_call.load(Ordering::Acquire),
-            progress.latest_failed_tool_call.load(Ordering::Acquire),
-        ),
-        (before.0 + 2, before.0 + 2),
-    );
+    // A dynamic function named exec is not a Code Mode wrapper. An MCP tool
+    // named wait is not a Code Mode poll. Both invalidate earlier scores.
+    for (index, tool) in [
+        ToolName::plain("exec"),
+        ToolName::namespaced("mcp__ordinary", "wait"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fixture.score_tool(tool).await;
+        let expected = before.0 + index + 1;
+        assert_eq!(
+            (
+                progress.latest_tool_call.load(Ordering::Acquire),
+                progress.latest_failed_tool_call.load(Ordering::Acquire),
+            ),
+            (expected, expected),
+        );
+    }
     Ok(())
 }
 
@@ -1252,6 +1287,9 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1291,6 +1329,9 @@ max_classifier_instruction_tokens = 256
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": truncate_entry(
@@ -1372,6 +1413,9 @@ max_recent_non_user_entries = 8
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1633,6 +1677,8 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
 
     let user_image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgEpEDAABoAD1UCKP3AAAAAElFTkSuQmCC";
     let tool_image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQE+ECAACQAD304kFaAAAAAElFTkSuQmCC";
+    let user_file_id = "file_user";
+    let tool_file_id = "file_tool";
     let history = vec![
         ResponseItem::Message {
             id: None,
@@ -1644,6 +1690,12 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
                 ContentItem::InputImage {
                     image: ImageReference::Inline {
                         image_url: user_image.to_owned(),
+                    },
+                    detail: Some(ImageDetail::High),
+                },
+                ContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: user_file_id.to_owned(),
                     },
                     detail: Some(ImageDetail::High),
                 },
@@ -1675,6 +1727,12 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
                     },
                     detail: Some(ImageDetail::High),
                 },
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: tool_file_id.to_owned(),
+                    },
+                    detail: Some(ImageDetail::High),
+                },
             ]),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1696,7 +1754,7 @@ enabled = true
         .expect("Luna user content should be an array");
 
     assert_eq!(
-        content[content.len() - 2..],
+        content[content.len() - 4..],
         [
             json!({
                 "type": "input_image",
@@ -1704,7 +1762,15 @@ enabled = true
             }),
             json!({
                 "type": "input_image",
+                "file_id": user_file_id,
+            }),
+            json!({
+                "type": "input_image",
                 "image_url": tool_image,
+            }),
+            json!({
+                "type": "input_image",
+                "file_id": tool_file_id,
             }),
         ]
     );
@@ -1771,6 +1837,9 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1944,9 +2013,12 @@ async fn assert_luna_pool_context(thread_context_enabled: bool) -> Result<()> {
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions().replace(
                     "{{ tenant_policy_config }}",
                     TEST_GUARDIAN_POLICY,
                 ),
@@ -2195,7 +2267,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
         .expect("Guardian v2 should have initialized")
         .as_ref()
         .clone();
-    guardian_config.policy = GuardianPolicy::from_legacy(Some(&GuardianV2ReviewScopeConfigToml {
+    guardian_config.policy = legacy_loader(Some(&GuardianV2ReviewScopeConfigToml {
         computer_use_only: Some(false),
         sandboxed_exec_commands: Some(false),
     }));
@@ -2424,7 +2496,7 @@ async fn assert_compaction_approval_policy(thread_context_enabled: bool) -> Resu
             .get::<GuardianV2Config>()
             .expect("Guardian configuration"))
         .clone();
-        config.policy = GuardianPolicy::from_legacy(Some(&GuardianV2ReviewScopeConfigToml {
+        config.policy = legacy_loader(Some(&GuardianV2ReviewScopeConfigToml {
             computer_use_only: Some(computer_use_only),
             sandboxed_exec_commands: Some(true),
         }));
@@ -2550,9 +2622,12 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions().replace(
                     "{{ tenant_policy_config }}",
                     TEST_CATALOG_GUARDIAN_POLICY,
                 ),
@@ -2593,9 +2668,12 @@ async fn contributor_preserves_uncapped_classifier_instructions() -> Result<()> 
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions()
                     .replace("{{ tenant_policy_config }}", &guardian_policy),
             }],
         })
@@ -2624,7 +2702,8 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
         .as_str()
         .expect("Luna request should contain developer instructions");
 
-    let (prefix, suffix) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, suffix) = ResolvedModelMessages::bundled()
+        .guardian_classifier_instructions()
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(instructions.starts_with(&format!("{prefix}Reject unsafe uploads.")));
@@ -2997,6 +3076,7 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
         retained,
         current: conversation_history,
         compaction_model_hash: parent_model.comp_hash.clone(),
+        retained_context: thread_context_enabled.then(codex_history::RetainedContext::default),
     };
     thread_store.insert(parent_model);
 
@@ -3029,7 +3109,8 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
     assert_eq!(request["input"][0]["type"], "additional_tools");
     let developer_message = &request["input"][1];
     assert_eq!(developer_message["role"], "developer");
-    let (prefix, _) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, _) = ResolvedModelMessages::bundled()
+        .guardian_classifier_instructions()
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(
@@ -3091,6 +3172,8 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
             conversation_history: Arc::new(TestRetainedHistory {
                 current: TestConversationHistory(vec![latest_compaction, oversized_compaction]),
                 retained: Vec::new(),
+                retained_context: thread_context_enabled
+                    .then(codex_history::RetainedContext::default),
                 compaction_model_hash: thread_store
                     .get::<ModelInfo>()
                     .and_then(|model| model.comp_hash.clone()),
@@ -3314,7 +3397,10 @@ async fn cached_approval(
     let action = serde_json::from_str(action).unwrap_or(serde_json::Value::Null);
     let category = match review_scope(&action) {
         Some(category) => category,
-        None if store.get::<super::GuardianV2Config>()?.policy.other_tools
+        None if store
+            .get::<super::GuardianV2Config>()?
+            .policy_for_model(store.get::<ModelInfo>().as_deref())
+            .other_tools
             == codex_protocol::openai_models::GuardianReviewMode::Adaptive =>
         {
             codex_protocol::openai_models::GuardianScope::Shell

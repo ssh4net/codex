@@ -21,4 +21,4 @@ expression: descriptions
   Skip Question · Chat
   Current ctrl-] · Default keymap
   Config `tui.keymap.chat.skip_question`
-  Skip the focused question.
+  Discard the focused question, or all collapsed questions.

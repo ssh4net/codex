@@ -354,7 +354,21 @@ async fn disconnected_questions_remain_editable_without_sending() {
     assert_eq!(question_count(&chat), 2);
     assert!(op_rx.try_recv().is_err());
     chat.handle_disconnected_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
-    assert_eq!(question_count(&chat), 2);
+    assert_eq!(question_count(&chat), 1);
+    assert!(op_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn collapsed_questions_can_be_discarded_without_sending() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.add_async_questions("message", &questions());
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+
+    assert_eq!(question_count(&chat), 0);
+    assert!(op_rx.try_recv().is_err());
+    chat.add_async_questions("message", &questions());
+    assert_eq!(question_count(&chat), 0);
 }
 
 fn question_count(chat: &ChatWidget) -> usize {
@@ -741,7 +755,7 @@ async fn question_drafts_survive_navigation_and_snapshot_replay() {
     chat.pause_unavailable_thread();
     chat.handle_question_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
     chat.handle_question_key(KeyEvent::from(KeyCode::Enter));
-    assert_eq!(question_count(&chat), 3);
+    assert_eq!(question_count(&chat), 2);
     assert!(ops.try_recv().is_err());
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
     assert!(render_bottom_popup(&chat, /*width*/ 80).contains("first draft"));

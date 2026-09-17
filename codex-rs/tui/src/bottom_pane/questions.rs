@@ -64,6 +64,17 @@ impl BottomPane {
         if let Some(binding) = self.pending_input_preview.edit_binding {
             lines.push(Line::from(vec!["    ".into(), binding.into(), " to answer".into()]).dim());
         }
+        if let Some(binding) = self
+            .keymap
+            .primary_hint(crate::keymap::KeymapContext::Chat, "skip_question")
+        {
+            let label = if count == 1 {
+                " to discard"
+            } else {
+                " to discard all"
+            };
+            lines.push(Line::from(vec!["    ".into(), binding.into(), label.into()]).dim());
+        }
         Some(lines)
     }
 }

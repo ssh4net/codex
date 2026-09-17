@@ -1,7 +1,7 @@
 //! Low-level markdown event renderer for the TUI transcript.
 //!
 //! This module consumes `pulldown-cmark` events and emits styled `ratatui`
-//! lines, including table layout, width-aware wrapping, and local file-link
+//! lines, including table layout, Mermaid previews, width-aware wrapping, and local file-link
 //! display. It is the final rendering stage used by higher-level helpers in
 //! `markdown.rs`.
 //!
@@ -35,9 +35,13 @@
 //! unusably short chunks, expansive cells form tall narrow strips across enough
 //! body rows, or even 3-char-wide columns cannot fit, body rows render as
 //! key/value records.
+//!
+//! Inline code and local file paths share the active syntax theme's raw-markup foreground.
 
 use crate::markdown_text_merge::DecodedTextMerge;
+use crate::render::highlight::current_syntax_theme;
 use crate::render::highlight::foreground_style_for_scopes;
+use crate::render::highlight::foreground_style_for_scopes_with_theme;
 use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
 use crate::style::table_separator_style;
@@ -72,6 +76,7 @@ use std::path::PathBuf;
 mod file_citations;
 mod local_links;
 mod math;
+mod mermaid;
 mod streaming;
 mod table_key_value;
 mod web_links;
@@ -108,6 +113,12 @@ struct MarkdownStyles {
 
 impl Default for MarkdownStyles {
     fn default() -> Self {
+        Self::for_theme(&crate::render::highlight::current_syntax_theme())
+    }
+}
+
+impl MarkdownStyles {
+    fn for_theme(theme: &syntect::highlighting::Theme) -> Self {
         Self {
             h1: Style::new().bold().underlined(),
             h2: Style::new().bold(),
@@ -115,7 +126,14 @@ impl Default for MarkdownStyles {
             h4: Style::new().italic(),
             h5: Style::new().italic(),
             h6: Style::new().italic(),
-            code: Style::new().cyan(),
+            code: foreground_style_for_scopes_with_theme(
+                theme,
+                &[
+                    "markup.inline.raw.string.markdown",
+                    "markup.raw.inline.markdown",
+                ],
+            )
+            .unwrap_or_else(|| Style::new().cyan()),
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
@@ -340,7 +358,7 @@ pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
-    let math = math::MathMarkdown::new(input, options);
+    let math = math::MathMarkdown::new(input, options, width);
     let parser = DecodedTextMerge::new(
         math.events(Parser::new_ext(&math.markdown, options).into_offset_iter()),
     );
@@ -394,6 +412,7 @@ where
     code_block_lang: Option<String>,
     code_block_buffer: String,
     code_block_prefix_policy: LinePrefixPolicy,
+    code_block_content_end: usize,
     wrap_width: Option<usize>,
     cwd: Option<PathBuf>,
     is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
@@ -437,6 +456,7 @@ where
             code_block_lang: None,
             code_block_buffer: String::new(),
             code_block_prefix_policy: LinePrefixPolicy::Apply,
+            code_block_content_end: 0,
             wrap_width,
             cwd: cwd.map(Path::to_path_buf),
             is_hidden_link_destination,
@@ -463,8 +483,13 @@ where
         self.prepare_for_event(&event);
         match event {
             Event::Start(tag) => self.start_tag(tag, range),
-            Event::End(tag) => self.end_tag(tag),
-            Event::Text(text) => self.text(text),
+            Event::End(tag) => self.end_tag(tag, range),
+            Event::Text(text) => {
+                if self.in_code_block {
+                    self.code_block_content_end = range.end;
+                }
+                self.text(text);
+            }
             Event::Code(code) => self.code(code),
             Event::SoftBreak => self.soft_break(),
             Event::HardBreak => self.hard_break(),
@@ -505,7 +530,10 @@ where
             Tag::Paragraph => self.start_paragraph(),
             Tag::Heading { level, .. } => self.start_heading(level),
             Tag::BlockQuote => self.start_blockquote(),
-            Tag::CodeBlock(kind) => self.start_codeblock(kind),
+            Tag::CodeBlock(kind) => {
+                self.code_block_content_end = range.end;
+                self.start_codeblock(kind)
+            }
             Tag::List(start) => self.start_list(start),
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_inline_style(self.styles.emphasis),
@@ -523,12 +551,12 @@ where
         }
     }
 
-    fn end_tag(&mut self, tag: TagEnd) {
+    fn end_tag(&mut self, tag: TagEnd, range: Range<usize>) {
         match tag {
             TagEnd::Paragraph => self.end_paragraph(),
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote => self.end_blockquote(),
-            TagEnd::CodeBlock => self.end_codeblock(),
+            TagEnd::CodeBlock => self.end_codeblock(range),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
                 self.flush_current_line();
@@ -884,18 +912,40 @@ where
         self.needs_newline = true;
     }
 
-    fn end_codeblock(&mut self) {
-        // If we buffered code for a known language, syntax-highlight it now.
+    fn end_codeblock(&mut self, range: Range<usize>) {
+        // Completed Mermaid fences can replace source with a diagram; other blocks keep highlighting.
         if let Some(lang) = self.code_block_lang.take() {
             let code = std::mem::take(&mut self.code_block_buffer);
             if !code.is_empty() {
-                let highlighted = highlight_code_to_lines(&code, &lang);
+                let diagram = if lang == "mermaid"
+                    && mermaid::has_closing_fence(self.input, range, self.code_block_content_end)
+                {
+                    let indent =
+                        Self::spans_display_width(&self.prefix_spans(self.pending_marker_line));
+                    mermaid::render(
+                        &code,
+                        self.wrap_width.map(|width| width.saturating_sub(indent)),
+                        &current_syntax_theme(),
+                    )
+                } else {
+                    None
+                };
+                let (highlighted, prefix_policy) = match diagram {
+                    Some(diagram) => (diagram, LinePrefixPolicy::Apply),
+                    None => (
+                        highlight_code_to_lines(&code, &lang),
+                        self.code_block_prefix_policy,
+                    ),
+                };
+                let previous_prefix_policy =
+                    std::mem::replace(&mut self.code_block_prefix_policy, prefix_policy);
                 for hl_line in highlighted {
                     self.push_line(Line::default());
                     for span in hl_line.spans {
                         self.push_span(span);
                     }
                 }
+                self.code_block_prefix_policy = previous_prefix_policy;
             }
         }
 

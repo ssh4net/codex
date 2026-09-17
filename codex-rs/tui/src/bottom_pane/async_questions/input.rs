@@ -171,9 +171,7 @@ impl BottomPaneView for AsyncQuestions {
             return;
         }
         if key.kind == KeyEventKind::Press && self.keymap.chat.skip_question.is_pressed(key) {
-            if self.delivery_enabled {
-                self.accept_answer();
-            }
+            self.accept_answer();
             return;
         }
         if self.keymap.chat.edit_queued_message.is_pressed(key) {

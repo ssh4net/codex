@@ -50,4 +50,4 @@ printf 'fenced within fenced\n'
   "path": "C:\\Program Files\\App",
   "regex": "^foo.*(bar)?$"
 }
-  done [completion time]
+  [completion time]

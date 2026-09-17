@@ -368,15 +368,15 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
     assert_eq!(
         request.exec_server_sandbox,
         Some(codex_exec_server::FileSystemSandboxContext {
-            permissions: exec_server_permissions.clone().into(),
-            cwd: Some(cwd_uri.clone()),
+            permissions: exec_server_permissions.clone(),
+            cwd: cwd_uri.clone(),
             workspace_roots: vec![cwd_uri.clone()],
             user_home_dir: None,
             temporary_directories: None,
-            windows_sandbox_level: if cfg!(windows) {
-                codex_protocol::config_types::WindowsSandboxLevel::RestrictedToken
+            windows_sandbox_selection: if cfg!(windows) {
+                codex_file_system::WindowsSandboxSelection::RestrictedToken
             } else {
-                codex_protocol::config_types::WindowsSandboxLevel::Disabled
+                codex_file_system::WindowsSandboxSelection::Disabled
             },
             windows_sandbox_private_desktop: false,
             windows_sandbox_proxy_settings_mode: None,

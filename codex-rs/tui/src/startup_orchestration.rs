@@ -13,6 +13,11 @@ pub(super) async fn run_main_inner(
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    if cli.no_daemon && explicit_remote_endpoint.is_some() {
+        return Err(std::io::Error::other(
+            "--no-daemon cannot be used with --remote.",
+        ));
+    }
     let strict_config = cli.strict_config;
     if cli.shared.worktree {
         if explicit_remote_endpoint.is_some() {
@@ -150,16 +155,14 @@ pub(super) async fn run_main_inner(
         .await;
     }
 
-    let reuse_implicit_local_daemon = !cli.shared.worktree
-        && !cli.oss
-        && !workload_identity_selected
-        && (cli.agents_overview
-            || can_reuse_implicit_local_daemon(
-                &cli_kv_overrides,
-                &launch_loader_overrides,
-                strict_config,
-                cli.bypass_hook_trust,
-            ));
+    let mut daemon_exclusion = daemon_startup::exclusion(
+        &cli,
+        &cli_kv_overrides,
+        &launch_loader_overrides,
+        workload_identity_selected,
+        std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
+    );
+    let reuse_implicit_local_daemon = daemon_exclusion.is_none();
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
         && startup_preflight::has_only_search_config_override(&cli_kv_overrides)
@@ -199,7 +202,7 @@ pub(super) async fn run_main_inner(
     } else {
         None
     };
-    let app_server_target = app_server_target_for_launch(
+    let mut app_server_target = app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
@@ -258,6 +261,15 @@ pub(super) async fn run_main_inner(
             CloudConfigBundleLoader::default(),
         ))
         .await?;
+    let screen_reader_result = if !loader_overrides.ignore_user_config {
+        startup_draft
+            .run_until(screen_reader::initialize(
+                &bootstrap_config.config_layer_stack,
+            ))
+            .await?
+    } else {
+        Ok(())
+    };
     let cloud_config_bundle = startup_draft
         .run_until(cloud_config_bundle_for_app_server_target(
             &app_server_target,
@@ -372,6 +384,54 @@ pub(super) async fn run_main_inner(
             strict_config,
         ))
         .await?;
+    let auto_start_daemon = config.features.enabled(Feature::DaemonAutoStart)
+        && !cli.agents_overview
+        && !cli.no_daemon
+        && !app_server_target.uses_remote_workspace();
+    if auto_start_daemon
+        && daemon_exclusion.is_none()
+        && should_show_bedrock_setup_wizard(
+            LoginStatus::NotAuthenticated,
+            config.model_provider.requires_openai_auth,
+            &config,
+            &AppServerTarget::Embedded,
+        )
+        && startup_draft
+            .run_until(
+                config
+                    .auth_config()
+                    .load_auth(/*enable_codex_api_key_env*/ false),
+            )
+            .await?
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        // The Bedrock wizard configures its provider through the embedded server.
+        daemon_exclusion = Some("Bedrock sign-in");
+        app_server_target = AppServerTarget::Embedded;
+    }
+    if auto_start_daemon && daemon_exclusion.is_none() {
+        startup_draft.flush_pending_events().await?;
+        let output = startup_draft
+            .tui_mut()
+            .with_restored(|| async {
+                // Package installation may print progress; keep ordinary Ctrl+C handling.
+                crossterm::terminal::disable_raw_mode()?;
+                codex_app_server_daemon::run(codex_app_server_daemon::LifecycleCommand::Start)
+                    .await
+                    .map_err(|err| {
+                        std::io::Error::other(format!("{err:#}\n{}", daemon_startup::FAILURE_HINT))
+                    })
+            })
+            .await?;
+        app_server_target = AppServerTarget::LocalDaemon {
+            endpoint: RemoteAppServerEndpoint::UnixSocket {
+                socket_path: AbsolutePathBuf::from_absolute_path_checked(output.socket_path)?,
+            },
+            allow_embedded_fallback: false,
+        };
+    }
     startup_draft.apply_config(&config);
 
     let mut cloud_config_bundle = if workload_identity_selected {
@@ -406,6 +466,13 @@ pub(super) async fn run_main_inner(
     } else {
         None
     };
+    let daemon_startup_warning = daemon_exclusion
+        .filter(|_| auto_start_daemon)
+        .map(|reason| {
+            format!(
+                "Running without the shared background server: {reason} requires embedded mode."
+            )
+        });
     #[cfg(target_os = "macos")]
     let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
         codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
@@ -626,6 +693,10 @@ pub(super) async fn run_main_inner(
         .with(otel_tracing_layer)
         .try_init();
 
+    if let Err(err) = screen_reader_result {
+        tracing::warn!("Could not save screen-reader detection: {err}");
+    }
+
     let app_result = run_ratatui_app(
         cli,
         arg0_paths,
@@ -643,6 +714,7 @@ pub(super) async fn run_main_inner(
         state_db,
         environment_manager,
         managed_worktree.clone(),
+        daemon_startup_warning,
         startup_draft,
     )
     .await

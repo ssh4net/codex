@@ -37,6 +37,20 @@ impl ChatWidget {
                 .questions
                 .as_ref()
                 .is_some_and(|q| q.handles_key_as_editing(key));
+        if key.kind == KeyEventKind::Press
+            && !expanded
+            && self.chat_keymap.skip_question.is_pressed(key)
+            && self
+                .bottom_pane
+                .questions
+                .as_ref()
+                .is_some_and(|q| q.unanswered_count() > 0)
+        {
+            self.bottom_pane.clear_pending_questions();
+            self.refresh_pending_input_preview();
+            self.request_redraw();
+            return true;
+        }
         let forward = self.chat_keymap.edit_queued_message.is_pressed(key);
         let backward = self.chat_keymap.prompt_stack_back.is_pressed(key);
         if key.kind == KeyEventKind::Press && !editing && (forward || backward) {

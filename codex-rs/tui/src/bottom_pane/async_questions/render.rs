@@ -197,7 +197,7 @@ impl AsyncQuestions {
             );
         }
         if let Some(key) = chat_hint("skip_question") {
-            tips.push(format!("{} skip", key.display_label()).dim());
+            tips.push(format!("{} discard", key.display_label()).dim());
         }
         tips.extend(option_tip);
         if let Some(key) = chat_hint("prompt_stack_back") {

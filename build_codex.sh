@@ -55,7 +55,15 @@ if [[ "$target" != *-unknown-linux-* ]]; then
 fi
 
 short_commit="$(git -C "$source_root" rev-parse --short HEAD)"
-package_version="${CODEX_PACKAGE_VERSION:-0.0.0-fork.${short_commit}.$(date -u +%Y%m%d%H%M%S)}"
+workspace_version="$(
+    cd "$source_root"
+    CODEX_REPO_ROOT="$source_root" "$python_bin" -c '
+from scripts.codex_package.version import read_workspace_version
+
+print(read_workspace_version())
+'
+)"
+package_version="${CODEX_PACKAGE_VERSION:-${workspace_version}-fork.${short_commit}.$(date -u +%Y%m%d%H%M%S)}"
 release_root="$codex_home/packages/standalone"
 release_dir="$release_root/releases/${package_version}-${target}"
 output_dir="$codex_rs/target/release"

@@ -84,7 +84,7 @@ env = resolve_codex_v8_cargo_env(
     TARGET_SPECS[target],
     cache_root=Path(os.environ["CODEX_V8_CACHE_DIR"]),
 )
-print("\\n".join(
+print("\n".join(
     f"export {key}={shlex.quote(value)}"
     for key, value in env.items()
 ))

@@ -28,6 +28,7 @@ pub(crate) struct ResumeCwdContext<'path> {
     pub(crate) current_cwd: &'path Path,
     pub(crate) remembered_current_cwd: &'path Path,
     pub(crate) allow_remember_current: bool,
+    pub(crate) history_cwd_is_local: bool,
     pub(crate) mode: Option<ResumeCwdMode>,
 }
 
@@ -50,9 +51,7 @@ pub(crate) async fn read_session_cwd(
         .thread_read(thread_id, /*include_turns*/ false)
         .await
     {
-        Ok(thread) => Some(path_utils::restore_wsl_path_spelling(
-            thread.cwd.to_path_buf(),
-        )),
+        Ok(thread) => Some(thread.cwd.to_path_buf()),
         Err(err) => {
             tracing::warn!(%thread_id, %err, "Failed to read session cwd from app server");
             None
@@ -79,6 +78,13 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
             );
         }
         return Ok(ResolveCwdOutcome::Continue(None));
+    };
+    // Picker metadata and thread/read can carry the database's lowercase cwd.
+    // Only consult local directory entries for a local execution environment.
+    let history_cwd = if cwd_context.history_cwd_is_local {
+        path_utils::restore_wsl_path_spelling(history_cwd)
+    } else {
+        history_cwd
     };
     match cwd_context.mode {
         Some(ResumeCwdMode::Session) => {
@@ -147,6 +153,7 @@ mod tests {
                     current_cwd: &current_cwd,
                     remembered_current_cwd: &current_cwd,
                     allow_remember_current: true,
+                    history_cwd_is_local: true,
                     mode: Some(cwd_mode),
                 },
             )
@@ -176,6 +183,7 @@ mod tests {
                 current_cwd: &current_cwd,
                 remembered_current_cwd: &current_cwd,
                 allow_remember_current: true,
+                history_cwd_is_local: true,
                 mode: None,
             },
         )
@@ -204,6 +212,7 @@ mod tests {
                 current_cwd: &current_cwd,
                 remembered_current_cwd: &current_cwd,
                 allow_remember_current: true,
+                history_cwd_is_local: true,
                 mode: Some(ResumeCwdMode::Session),
             },
         )

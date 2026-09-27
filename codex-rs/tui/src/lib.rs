@@ -980,6 +980,7 @@ async fn resolve_startup_resume_or_fork_cwd(
             current_cwd: config.cwd.as_path(),
             remembered_current_cwd: config.cwd.as_path(),
             allow_remember_current: !uses_remote_workspace_or_environment || cwd_override.is_some(),
+            history_cwd_is_local: !uses_remote_workspace_or_environment,
             mode: resume_cwd_mode,
         },
     )
@@ -2330,6 +2331,10 @@ mod daemon_telemetry;
 #[cfg(test)]
 #[path = "daemon_startup_tests.rs"]
 mod daemon_startup_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "resume_wsl_tests.rs"]
+mod resume_wsl_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -71,6 +71,7 @@ impl App {
                     remembered_current_cwd,
                     allow_remember_current: !uses_remote_workspace_or_environment
                         || cwd_override.is_some(),
+                    history_cwd_is_local: !uses_remote_workspace_or_environment,
                     mode: resume_cwd_mode,
                 },
             )

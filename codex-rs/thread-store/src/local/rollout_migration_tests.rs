@@ -454,7 +454,7 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -584,7 +584,7 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -1064,7 +1064,7 @@ async fn migration_keeps_late_completions_for_surviving_turns_across_rollback() 
             thread_id,
             turn_id: None,
             include_archived: false,
-            cursor: None,
+            position: None,
             page_size: 20,
             sort_direction: SortDirection::Asc,
             sort_key: ItemSortKey::CreatedAtOrdinal,
@@ -1399,7 +1399,8 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
             {"order": if steer_order.is_some() { 2 } else { 1 }, "turn_id": "shared-turn", "call_id": "before", "questions": [{"question": "Publish?", "answer": "Only privately."}]},
             {"order": 3, "turn_id": "shared-turn", "call_id": "after", "questions": [{"question": "Publish the README?", "answer": "Do not publish it."}]}
         ],
-        "incomplete": false, "user_messages_incomplete": false, "next_order": 4
+        "incomplete": false, "user_messages_incomplete": false, "next_order": 4,
+        "assistant_messages": [], "assistant_messages_incomplete": true
     });
     checkpoint.retained_context =
         Some(serde_json::from_value(retained.clone()).expect("retained fixture"));
@@ -1456,6 +1457,18 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
             rollout_response_item(initial.clone()),
             user_message(INITIAL),
             RolloutItem::RetainedContext(answers[0].clone()),
+            RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope {
+                item: serde_json::from_value(json!({
+                    "type": "message", "id": "late-assistant", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Late assistant question?"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "shared-turn"}
+                }))
+                .expect("assistant message"),
+                metadata: Some(
+                    serde_json::from_value(json!({"user_input_order": 2}))
+                        .expect("assistant order"),
+                ),
+            }),
             RolloutItem::Compacted(before_steer),
             RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope {
                 item: steer,
@@ -1487,6 +1500,13 @@ async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
         .await
         .expect("migrate same-turn rollback");
     let migrated = read_rollout(&path);
+    assert_eq!(
+        migrated.iter().any(|line| matches!(&line.item,
+            RolloutItem::ResponseItem(envelope)
+                if envelope.item.id().is_some_and(|id| id.as_str() == "late-assistant")
+        )),
+        steer_order.is_none()
+    );
     let checkpoints = migrated
         .iter()
         .filter_map(|line| match &line.item {

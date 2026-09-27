@@ -30,7 +30,7 @@ pub(super) fn parse(header: &str, body: &[&str]) -> Result<Graph, RenderError> {
             rest = rest.trim_start();
             let label = if let Some(after) = rest.strip_prefix('|') {
                 let (label, remaining) = after.split_once('|').ok_or(RenderError::Unsupported)?;
-                check_label(label)?;
+                let label = flowchart_label(label)?;
                 rest = remaining;
                 label.to_owned()
             } else {
@@ -59,6 +59,13 @@ fn node(rest: &mut &str, graph: &mut Graph) -> Result<usize, RenderError> {
     ) {
         return Err(RenderError::Unsupported);
     }
+    // Longer shape delimiters must not become punctuation inside a simpler node.
+    if ["[(", "[[", "[/", "[\\", "{{"]
+        .iter()
+        .any(|open| rest.starts_with(open))
+    {
+        return Err(RenderError::Unsupported);
+    }
     let declaration = match rest.chars().next() {
         Some('[') => Some(("[", "]", Shape::Rectangle)),
         Some('{') => Some(("{", "}", Shape::Decision)),
@@ -70,7 +77,7 @@ fn node(rest: &mut &str, graph: &mut Graph) -> Result<usize, RenderError> {
         let (label, remaining) = rest[open.len()..]
             .split_once(close)
             .ok_or(RenderError::Unsupported)?;
-        check_label(label)?;
+        let label = flowchart_label(label)?;
         *rest = remaining;
         let node = &mut graph.nodes[index];
         if node.declared && (node.label != label || node.shape != shape) {
@@ -83,7 +90,30 @@ fn node(rest: &mut &str, graph: &mut Graph) -> Result<usize, RenderError> {
     Ok(index)
 }
 
+fn flowchart_label(label: &str) -> Result<&str, RenderError> {
+    // Mermaid Markdown strings require rendering beyond ordinary quoted labels.
+    if label.starts_with("\"`") {
+        return Err(RenderError::Unsupported);
+    }
+    let label = if let Some(quoted) = label.strip_prefix('"') {
+        quoted.strip_suffix('"').ok_or(RenderError::Unsupported)?
+    } else {
+        label
+    };
+    check_label_text(label)?;
+    Ok(label)
+}
+
 pub(super) fn check_label(label: &str) -> Result<(), RenderError> {
+    // Only delimited flowchart labels support literal ampersands. Other families must keep
+    // rejecting them so statement splitting cannot turn an entity into truncated label text.
+    if label.contains('&') {
+        return Err(RenderError::Unsupported);
+    }
+    check_label_text(label)
+}
+
+fn check_label_text(label: &str) -> Result<(), RenderError> {
     if label.trim().is_empty()
         || label.chars().any(|ch| {
             ch.is_control()
@@ -95,7 +125,6 @@ pub(super) fn check_label(label: &str) -> Result<(), RenderError> {
                         | '|'
                         | '<'
                         | '>'
-                        | '&'
                         | '"'
                         | '\\'
                         | '┌'

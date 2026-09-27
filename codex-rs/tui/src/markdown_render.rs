@@ -163,14 +163,24 @@ impl MarkdownStyles {
 struct IndentContext {
     prefix: Vec<Span<'static>>,
     marker: Option<Vec<Span<'static>>>,
+    copy_marker: String,
     is_list: bool,
 }
 
 impl IndentContext {
     fn new(prefix: Vec<Span<'static>>, marker: Option<Vec<Span<'static>>>, is_list: bool) -> Self {
+        // Keep the canonical marker separate from depth-dependent display padding.
+        let copy_marker = marker
+            .iter()
+            .flatten()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .trim_start()
+            .replace('•', "-");
         Self {
             prefix,
             marker,
+            copy_marker,
             is_list,
         }
     }
@@ -184,6 +194,7 @@ impl IndentContext {
 #[derive(Clone, Debug, Default)]
 struct TableCell {
     lines: Vec<HyperlinkLine>,
+    copies: Vec<crate::markdown_copy::CopyLine>,
 }
 
 // TableCell mutators inlined — called per-span during table event parsing.
@@ -192,11 +203,27 @@ impl TableCell {
     fn ensure_line(&mut self) {
         if self.lines.is_empty() {
             self.lines.push(HyperlinkLine::new(Line::default()));
+            self.copies.push(Default::default());
         }
     }
 
-    fn push_annotated(&mut self, mut appended: HyperlinkLine) {
+    fn push_annotated(
+        &mut self,
+        mut appended: HyperlinkLine,
+        inline: &[crate::markdown_copy::Inline],
+    ) {
         self.ensure_line();
+        if let Some(copy) = self.copies.last_mut() {
+            copy.push(
+                appended
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum(),
+                inline,
+            );
+        }
         if let Some(line) = self.lines.last_mut() {
             let shift = line.width();
             line.line.spans.append(&mut appended.line.spans);
@@ -211,6 +238,7 @@ impl TableCell {
     #[inline]
     fn hard_break(&mut self) {
         self.lines.push(HyperlinkLine::new(Line::default()));
+        self.copies.push(Default::default());
     }
 
     fn plain_text(&self) -> String {
@@ -378,8 +406,10 @@ pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
         input,
         math.events(Parser::new_ext(&math.markdown, options).into_offset_iter()),
     ));
-    let mut w = Writer::new(input, parser, width, cwd, is_hidden_link_destination);
-    w.run();
+    let mut w = Writer::new(input, width, cwd, is_hidden_link_destination);
+    // Drop the consumed parser before the rendering state, including on unwind.
+    let mut parser = parser;
+    w.run(&mut parser);
     w.text
 }
 
@@ -395,6 +425,7 @@ struct LinkState {
     /// can collapse to this canonical target without losing descriptive labels.
     local_target_display: Option<String>,
     local_label_spans: Vec<Span<'static>>,
+    local_label_inline: Vec<Vec<crate::markdown_copy::Inline>>,
 }
 
 fn should_render_link_destination(dest_url: &str) -> bool {
@@ -407,15 +438,15 @@ fn should_render_link_destination(dest_url: &str) -> bool {
 /// and an optional `TableState` for accumulating table events.  The
 /// `wrap_width` field enables width-aware line wrapping and table column
 /// allocation; when `None`, lines keep their intrinsic width.
-struct Writer<'a, 'policy, I>
-where
-    I: Iterator<Item = (Event<'a>, Range<usize>)>,
-{
+/// Layout state is independent of the parser so rendering routines are compiled
+/// once; event traversal remains statically dispatched over each iterator.
+struct Writer<'a, 'policy> {
     input: &'a str,
-    iter: I,
     text: Vec<HyperlinkLine>,
     styles: MarkdownStyles,
     inline_styles: Vec<Style>,
+    copy_inline: Vec<crate::markdown_copy::Inline>,
+    copy_line: crate::markdown_copy::CopyLine,
     indent_stack: Vec<IndentContext>,
     list_indices: Vec<Option<u64>>,
     list_needs_blank_before_next_item: Vec<bool>,
@@ -446,23 +477,20 @@ where
     table_state: Option<TableState>,
 }
 
-impl<'a, 'policy, I> Writer<'a, 'policy, I>
-where
-    I: Iterator<Item = (Event<'a>, Range<usize>)>,
-{
+impl<'a, 'policy> Writer<'a, 'policy> {
     fn new(
         input: &'a str,
-        iter: I,
         wrap_width: Option<usize>,
         cwd: Option<&Path>,
         is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
     ) -> Self {
         Self {
             input,
-            iter,
             text: Vec::new(),
             styles: MarkdownStyles::default(),
             inline_styles: Vec::new(),
+            copy_inline: Vec::new(),
+            copy_line: Default::default(),
             indent_stack: Vec::new(),
             list_indices: Vec::new(),
             list_needs_blank_before_next_item: Vec::new(),
@@ -494,17 +522,34 @@ where
         }
     }
 
-    fn run(&mut self) {
-        while let Some((ev, range)) = self.iter.next() {
-            self.handle_event(ev, range);
+    fn run<I>(&mut self, iter: &mut I)
+    where
+        I: Iterator<Item = (Event<'a>, Range<usize>)>,
+    {
+        while let Some((ev, range)) = iter.next() {
+            self.handle_event(ev, range, iter);
         }
         self.flush_current_line();
     }
 
-    fn handle_event(&mut self, event: Event<'a>, range: Range<usize>) {
+    fn handle_event<I>(&mut self, event: Event<'a>, range: Range<usize>, iter: &mut I)
+    where
+        I: Iterator<Item = (Event<'a>, Range<usize>)>,
+    {
         self.prepare_for_event(&event);
+        let copy_inline = crate::markdown_copy::Inline::from_event(&event);
+        if let Some(inline) = &copy_inline {
+            self.copy_inline.push(inline.clone());
+        }
+        let close_inline = matches!(
+            event,
+            Event::Code(_)
+                | Event::End(
+                    TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link
+                )
+        );
         match event {
-            Event::Start(tag) => self.start_tag(tag, range),
+            Event::Start(tag) => self.start_tag(tag, range, iter),
             Event::End(tag) => self.end_tag(tag, range),
             Event::Text(text) => {
                 if self.in_code_block {
@@ -521,6 +566,7 @@ where
                     self.push_blank_line();
                 }
                 self.push_line(Line::from("———"));
+                self.copy_line.rule = true;
                 self.needs_newline = true;
             }
             Event::Html(html) => self.html(html, /*inline*/ false),
@@ -536,6 +582,9 @@ where
                     }
                 }
             }
+        }
+        if close_inline {
+            self.copy_inline.pop();
         }
     }
 
@@ -556,7 +605,10 @@ where
         self.push_line(Line::default());
     }
 
-    fn start_tag(&mut self, tag: Tag<'a>, range: Range<usize>) {
+    fn start_tag<I>(&mut self, tag: Tag<'a>, range: Range<usize>, iter: &mut I)
+    where
+        I: Iterator<Item = (Event<'a>, Range<usize>)>,
+    {
         match tag {
             Tag::Paragraph => self.start_paragraph(),
             Tag::Heading { level, .. } => self.start_heading(level),
@@ -577,10 +629,20 @@ where
                 };
                 self.start_codeblock(lang, indent, prefix_policy)
             }
-            Tag::List(start) => self.start_list(start),
+            Tag::List(start) => {
+                if self.pending_marker_line
+                    && self.input[..range.start]
+                        .rsplit('\n')
+                        .next()
+                        .is_some_and(|line| line.trim_matches(['>', ' ', '\t']).is_empty())
+                {
+                    self.push_line(Line::default());
+                }
+                self.start_list(start);
+            }
             Tag::Item => {
                 self.start_item();
-                if let Some((next, next_range)) = self.iter.next() {
+                if let Some((next, next_range)) = iter.next() {
                     // Recover markers consumed without an event before block content or empty items.
                     let content_start = if matches!(next, Event::End(TagEnd::Item)) {
                         range.end
@@ -608,7 +670,7 @@ where
                             self.push_line(Line::default());
                         }
                     }
-                    self.handle_event(next, next_range);
+                    self.handle_event(next, next_range, iter);
                 }
             }
             Tag::Emphasis => self.push_inline_style(self.styles.emphasis),
@@ -628,12 +690,23 @@ where
 
     fn end_tag(&mut self, tag: TagEnd, range: Range<usize>) {
         match tag {
-            TagEnd::Paragraph => self.end_paragraph(),
+            TagEnd::Paragraph => {
+                // At a streaming EOF, the parser omits a trailing hard-break event. Retain it
+                // before this line is committed and a later delta supplies the next line.
+                self.copy_line.hard_break |= self
+                    .input
+                    .get(..range.end)
+                    .is_some_and(|prefix| prefix.ends_with("  \n") || prefix.ends_with("  \r\n"));
+                self.end_paragraph();
+            }
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote => self.end_blockquote(),
             TagEnd::CodeBlock => self.end_codeblock(range),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
+                if self.pending_marker_line {
+                    self.push_line(Line::default());
+                }
                 self.flush_current_line();
                 let start_line_count = self.list_item_start_line_counts.pop().unwrap_or_default();
                 if let Some(list) = self.uniform_lists.last_mut() {
@@ -701,7 +774,9 @@ where
             HeadingLevel::H6 => self.styles.h6,
         };
         let content = format!("{} ", "#".repeat(level as usize));
+        let heading = content.len();
         self.push_line(Line::from(vec![Span::styled(content, heading_style)]));
+        self.copy_line.heading = heading;
         self.push_inline_style(heading_style);
         self.needs_newline = false;
     }
@@ -870,6 +945,7 @@ where
             self.push_table_cell_hard_break();
             return;
         }
+        self.copy_line.hard_break = true;
         self.push_line(Line::default());
     }
 
@@ -928,6 +1004,14 @@ where
         if separate {
             let index = self.text.len();
             self.push_blank_line();
+            if let Some(line) = self.text.get_mut(index) {
+                let mut source =
+                    crate::terminal_hyperlinks::LogicalLineSource::from_line(&line.line);
+                let mut copy = crate::markdown_copy::CopyLine::default();
+                copy.omit = true;
+                source.copy = Some(std::sync::Arc::new(copy));
+                line.source = Some(source);
+            }
             if self.text.len() > index
                 && let Some(list) = self.uniform_lists.last_mut()
             {
@@ -1033,11 +1117,11 @@ where
                 {
                     let indent =
                         Self::spans_display_width(&self.prefix_spans(self.pending_marker_line));
-                    mermaid::render(
+                    Some(mermaid::render(
                         &code,
                         self.wrap_width.map(|width| width.saturating_sub(indent)),
                         &current_syntax_theme(),
-                    )
+                    ))
                 } else {
                     None
                 };
@@ -1074,17 +1158,44 @@ where
             return;
         };
 
+        let table: std::sync::Arc<[&str]> = table_state
+            .alignments
+            .iter()
+            .map(|alignment| match alignment {
+                Alignment::None => "---",
+                Alignment::Left => ":---",
+                Alignment::Center => ":---:",
+                Alignment::Right => "---:",
+            })
+            .collect();
         let RenderedTableLines {
             table_lines,
             table_lines_prewrapped,
             spillover_lines,
-        } = self.render_table_lines(table_state);
+        } = self.render_table_lines(table_state, &table);
         let mut pending_marker_line = self.pending_marker_line;
-        for line in table_lines {
+        for mut line in table_lines {
+            if line
+                .source
+                .as_ref()
+                .and_then(|source| source.copy.as_ref())
+                .is_none()
+            {
+                crate::markdown_copy::table::attach(
+                    &mut line,
+                    Some(crate::markdown_copy::table::TableLine::empty(&table)),
+                );
+            }
             if table_lines_prewrapped {
                 self.push_prewrapped_line(line, pending_marker_line);
             } else {
+                let table = line
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.copy.as_ref())
+                    .and_then(|copy| copy.table.clone());
                 self.push_hyperlink_line(line);
+                self.copy_line.table = table;
                 self.flush_current_line();
             }
             pending_marker_line = false;
@@ -1199,7 +1310,7 @@ where
         if let Some(table_state) = self.table_state.as_mut()
             && let Some(cell) = table_state.current_cell.as_mut()
         {
-            cell.push_annotated(annotated);
+            cell.push_annotated(annotated, &self.copy_inline);
         }
     }
 
@@ -1239,7 +1350,7 @@ where
         if let Some(table_state) = self.table_state.as_mut()
             && let Some(cell) = table_state.current_cell.as_mut()
         {
-            cell.push_annotated(std::mem::take(&mut annotated));
+            cell.push_annotated(std::mem::take(&mut annotated), &self.copy_inline);
         }
     }
 
@@ -1254,7 +1365,11 @@ where
     /// Falls back to key/value records when body rows cannot fit in the aligned
     /// grid; header-only tables retain raw pipe output because they contain no
     /// records to transpose.
-    fn render_table_lines(&self, mut table_state: TableState) -> RenderedTableLines {
+    fn render_table_lines(
+        &self,
+        mut table_state: TableState,
+        table: &std::sync::Arc<[&'static str]>,
+    ) -> RenderedTableLines {
         let column_count = table_state.alignments.len();
         if column_count == 0 {
             return RenderedTableLines {
@@ -1287,6 +1402,21 @@ where
         Self::normalize_row(&mut header, column_count);
         for row in &mut rows {
             Self::normalize_row(row, column_count);
+        }
+        for (row_index, row) in std::iter::once(&mut header)
+            .chain(rows.iter_mut())
+            .enumerate()
+        {
+            for (column, cell) in row.iter_mut().enumerate() {
+                cell.ensure_line();
+                crate::markdown_copy::table::annotate_cell(
+                    &mut cell.lines,
+                    std::mem::take(&mut cell.copies),
+                    table,
+                    row_index,
+                    column,
+                );
+            }
         }
 
         let metrics = Self::collect_table_column_metrics(&header, &rows, column_count);
@@ -1653,16 +1783,25 @@ where
                     .get(row_line)
                     .is_some_and(|line| Self::line_display_width(&line.line) > 0)
             }) else {
-                out.push(HyperlinkLine::new(Line::default().style(row_style)));
+                let mut line = wrapped_cells
+                    .iter()
+                    .find_map(|cell| cell.get(row_line))
+                    .cloned()
+                    .unwrap_or_default();
+                line.line.style = row_style;
+                out.push(line);
                 continue;
             };
             let mut spans = Vec::new();
+            let mut copy = None;
+            let mut byte_offset = 0;
             for (column, width) in column_widths
                 .iter()
                 .enumerate()
                 .take(last_visible_column + 1)
             {
                 spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING)));
+                byte_offset += TABLE_CELL_PADDING;
                 let mut line = wrapped_cells[column]
                     .get(row_line)
                     .cloned()
@@ -1677,19 +1816,33 @@ where
                 if left_padding > 0 {
                     spans.push(Span::raw(" ".repeat(left_padding)));
                 }
+                byte_offset += left_padding;
+                if let Some(source) = &line.source {
+                    crate::markdown_copy::table::append(&mut copy, source, byte_offset);
+                }
+                byte_offset += line
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum::<usize>();
                 spans.append(&mut line.line.spans);
                 let is_last_column = column == last_visible_column;
                 if right_padding > 0 && !is_last_column {
                     spans.push(Span::raw(" ".repeat(right_padding)));
+                    byte_offset += right_padding;
                 }
                 if !is_last_column {
                     spans.push(Span::raw(" ".repeat(TABLE_CELL_PADDING)));
+                    byte_offset += TABLE_CELL_PADDING;
                 }
                 if !is_last_column {
                     spans.push(Span::raw(" ".repeat(TABLE_COLUMN_GAP)));
+                    byte_offset += TABLE_COLUMN_GAP;
                 }
             }
             let mut out_line = HyperlinkLine::new(Line::from(spans).style(row_style));
+            crate::markdown_copy::table::attach(&mut out_line, copy);
             let mut column_start = 0usize;
             for (column, width) in column_widths
                 .iter()
@@ -1741,12 +1894,16 @@ where
 
     fn row_to_pipe_line(row: &[TableCell]) -> HyperlinkLine {
         let mut out = HyperlinkLine::new(Line::default());
+        let mut copy = None;
+        let mut byte_offset = 1;
         out.push_span("|".into(), /*destination*/ None);
         for cell in row {
             out.push_span(" ".into(), /*destination*/ None);
+            byte_offset += 1;
             for (index, line) in cell.lines.iter().enumerate() {
                 if index > 0 {
                     out.push_span(" ".into(), /*destination*/ None);
+                    byte_offset += 1;
                 }
                 let text = line
                     .line
@@ -1764,7 +1921,7 @@ where
                         out.push_span(Span::raw(std::mem::take(current_text)), destination);
                     }
                 };
-                for ch in text.chars() {
+                for (byte, ch) in text.char_indices() {
                     let destination = line
                         .hyperlinks
                         .iter()
@@ -1776,15 +1933,23 @@ where
                     }
                     if ch == '|' {
                         current_text.push_str("\\|");
+                        byte_offset += 1;
                     } else {
                         current_text.push(ch);
                     }
+                    if let Some(mut source) = line.source.clone() {
+                        source.range = byte..byte + ch.len_utf8();
+                        crate::markdown_copy::table::append(&mut copy, &source, byte_offset);
+                    }
+                    byte_offset += ch.len_utf8();
                     column += char_width(ch);
                 }
                 flush(&mut out, &mut current_text, current_destination);
             }
             out.push_span(" |".into(), /*destination*/ None);
+            byte_offset += 2;
         }
+        crate::markdown_copy::table::attach(&mut out, copy);
         out
     }
 
@@ -1822,7 +1987,7 @@ where
                     .map(|line| line_to_static(&line))
                     .collect::<Vec<_>>();
             if rendered.is_empty() {
-                wrapped.push(HyperlinkLine::new(Line::default()));
+                wrapped.push(source_line.clone());
             } else {
                 wrapped.extend(remap_wrapped_line(source_line, rendered));
             };
@@ -1993,6 +2158,7 @@ where
                 None
             },
             local_label_spans: Vec::new(),
+            local_label_inline: Vec::new(),
             destination: dest_url,
         });
     }
@@ -2018,7 +2184,7 @@ where
                     if let Some(table_state) = self.table_state.as_mut()
                         && let Some(cell) = table_state.current_cell.as_mut()
                     {
-                        cell.push_annotated(destination);
+                        cell.push_annotated(destination, &self.copy_inline);
                     }
                     self.push_span_to_table_cell(")".into());
                 } else {
@@ -2048,8 +2214,14 @@ where
                 let span = Span::styled(local_target_display, style);
                 if self.in_table_cell() {
                     if show_label {
-                        for label_span in link.local_label_spans {
+                        for (label_span, inline) in link
+                            .local_label_spans
+                            .into_iter()
+                            .zip(link.local_label_inline)
+                        {
+                            let previous = std::mem::replace(&mut self.copy_inline, inline);
                             self.push_span_to_table_cell(label_span);
+                            self.copy_inline = previous;
                         }
                         self.push_span_to_table_cell(" (".into());
                     }
@@ -2062,8 +2234,14 @@ where
                         self.push_line(Line::default());
                     }
                     if show_label {
-                        for label_span in link.local_label_spans {
+                        for (label_span, inline) in link
+                            .local_label_spans
+                            .into_iter()
+                            .zip(link.local_label_inline)
+                        {
+                            let previous = std::mem::replace(&mut self.copy_inline, inline);
                             self.push_span(label_span);
+                            self.copy_inline = previous;
                         }
                         self.push_span(" (".into());
                     }
@@ -2087,6 +2265,13 @@ where
     fn push_local_link_label_span(&mut self, span: Span<'static>) {
         if let Some(link) = self.link.as_mut() {
             link.local_label_spans.push(span);
+            link.local_label_inline.push(
+                self.copy_inline[..self
+                    .copy_inline
+                    .len()
+                    .min(crate::markdown_copy::MAX_COPY_DEPTH)]
+                    .to_vec(),
+            );
         }
     }
 
@@ -2105,10 +2290,13 @@ where
     fn flush_current_line(&mut self) {
         if let Some(mut line) = self.current_line_content.take() {
             let style = self.current_line_style;
+            let mut source = crate::terminal_hyperlinks::LogicalLineSource::from_line(&line.line);
+            source.copy = Some(std::sync::Arc::new(std::mem::take(&mut self.copy_line)));
             // NB we don't wrap code in code blocks, in order to preserve whitespace for copy/paste.
             if !self.current_line_in_code_block
                 && let Some(width) = self.wrap_width
             {
+                line.source = Some(source);
                 let opts = RtOptions::new(width)
                     .initial_indent(self.current_initial_indent.clone().into())
                     .subsequent_indent(self.current_subsequent_indent.clone().into());
@@ -2120,8 +2308,6 @@ where
                 }
             } else {
                 let mut spans = self.current_initial_indent.clone();
-                let mut source =
-                    crate::terminal_hyperlinks::LogicalLineSource::from_line(&line.line);
                 source.prefix_bytes = spans.iter().map(|span| span.content.len()).sum();
                 source.continuation_indent = self.current_subsequent_indent.clone().into();
                 line.source = Some(source);
@@ -2166,6 +2352,20 @@ where
         };
 
         let mut spans = self.prefix_spans(pending_marker_line);
+        let mut source = crate::terminal_hyperlinks::LogicalLineSource::from_line(&line.line);
+        let mut copy = line
+            .source
+            .as_ref()
+            .and_then(|source| source.copy.as_deref())
+            .cloned()
+            .unwrap_or_default();
+        copy.prefix = self.copy_prefix(pending_marker_line);
+        copy.continuation = self.copy_prefix(/*pending_marker_line*/ false);
+        copy.item_prefix = self.copy_prefix(/*pending_marker_line*/ true);
+        source.copy = Some(std::sync::Arc::new(copy));
+        source.prefix_bytes = spans.iter().map(|span| span.content.len()).sum();
+        source.continuation_indent = self.prefix_spans(/*pending_marker_line*/ false).into();
+        line.source = Some(source);
         let shift = Self::spans_display_width(&spans);
         spans.append(&mut line.line.spans);
         for hyperlink in &mut line.hyperlinks {
@@ -2198,9 +2398,17 @@ where
             self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
         }
         self.current_line_style = style;
-        let mut line = HyperlinkLine::new(line);
-        line.prefix_policy = prefix_policy;
-        self.current_line_content = Some(line);
+        self.copy_line = crate::markdown_copy::CopyLine::default();
+        self.copy_line.prefix = self.copy_prefix(was_pending);
+        self.copy_line.continuation = self.copy_prefix(/*pending_marker_line*/ false);
+        self.copy_line.item_prefix = self.copy_prefix(/*pending_marker_line*/ true);
+        self.copy_line.code = self.in_code_block;
+        // Heading markers are already visible; retain them as Markdown syntax.
+        self.copy_line
+            .push(line.spans.iter().map(|span| span.content.len()).sum(), &[]);
+        let mut hyperlink_line = HyperlinkLine::new(line);
+        hyperlink_line.prefix_policy = prefix_policy;
+        self.current_line_content = Some(hyperlink_line);
         self.current_line_in_code_block = self.in_code_block;
         self.current_line_prefix_policy = prefix_policy;
         self.line_ends_with_local_link_target = false;
@@ -2222,6 +2430,7 @@ where
             self.push_line(Line::default());
         }
         if let Some(line) = self.current_line_content.as_mut() {
+            self.copy_line.push(span.content.len(), &self.copy_inline);
             line.push_span(
                 span,
                 self.link.as_ref().map(|link| link.destination.as_str()),
@@ -2234,6 +2443,15 @@ where
             self.push_line(Line::default());
         }
         if let Some(line) = self.current_line_content.as_mut() {
+            self.copy_line.push(
+                appended
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum(),
+                &self.copy_inline,
+            );
             let shift = line.width();
             line.line.spans.append(&mut appended.line.spans);
             line.hyperlinks
@@ -2274,6 +2492,33 @@ where
 
     fn push_output_line(&mut self, line: HyperlinkLine) {
         self.text.push(line);
+    }
+
+    // Markdown needs relative container indentation, not the display's fixed-depth padding.
+    fn copy_prefix(&self, pending_marker_line: bool) -> String {
+        // Code's display padding is not a Markdown container. Keep only the innermost semantic
+        // containers so lazy continuation lines cannot each retain an arbitrarily deep prefix.
+        let containers =
+            &self.indent_stack[..self.indent_stack.len() - usize::from(self.in_code_block)];
+        let containers = &containers[containers
+            .len()
+            .saturating_sub(crate::markdown_copy::MAX_COPY_DEPTH)..];
+        let last_list = containers.iter().rposition(|context| context.is_list);
+        let mut prefix = String::new();
+        for (index, context) in containers.iter().enumerate() {
+            if context.is_list {
+                let marker = &context.copy_marker;
+                let width = marker.find('[').unwrap_or(marker.len());
+                if pending_marker_line && Some(index) == last_list {
+                    prefix.push_str(marker);
+                } else {
+                    prefix.extend(std::iter::repeat_n(' ', width));
+                }
+            } else {
+                prefix.extend(context.prefix.iter().map(|span| span.content.as_ref()));
+            }
+        }
+        prefix
     }
 
     fn prefix_spans(&self, pending_marker_line: bool) -> Vec<Span<'static>> {
@@ -2519,13 +2764,12 @@ mod tests {
     #[test]
     fn wrap_cell_preserves_hard_break_lines() {
         let mut cell = TableCell::default();
-        cell.push_annotated(Line::from("first line").into());
+        cell.push_annotated(Line::from("first line").into(), &[]);
         cell.hard_break();
-        cell.push_annotated(Line::from("second line").into());
+        cell.push_annotated(Line::from("second line").into(), &[]);
 
         let writer = W::new(
             "",
-            std::iter::empty(),
             /*wrap_width*/ Some(80),
             /*cwd*/ None,
             &never_hide_link_destination,
@@ -2548,15 +2792,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn blank_table_continuations_do_not_repeat_the_first_cell() {
+        let mut cell = make_cell("first");
+        cell.hard_break();
+        cell.hard_break();
+        cell.push_annotated(Line::from("last").into(), &[]);
+        cell.hard_break();
+        let writer = W::new(
+            "",
+            /*wrap_width*/ Some(80),
+            /*cwd*/ None,
+            &never_hide_link_destination,
+        );
+        let lines = writer.render_table_row(
+            &[make_cell("short"), cell],
+            &[5, 5],
+            &[Alignment::None, Alignment::None],
+            Style::default(),
+        );
+        let rendered: Vec<_> = lines.iter().map(|line| line.line.to_string()).collect();
+        insta::assert_debug_snapshot!(rendered);
+    }
+
     // ---------------------------------------------------------------
     // Type alias for calling private associated functions on Writer.
     // ---------------------------------------------------------------
-    type W<'a> = Writer<'a, 'a, std::iter::Empty<(Event<'a>, Range<usize>)>>;
+    type W<'a> = Writer<'a, 'a>;
 
     /// Build a single-line `TableCell` from plain text.
     fn make_cell(text: &str) -> TableCell {
         let mut cell = TableCell::default();
-        cell.push_annotated(Line::from(text.to_string()).into());
+        cell.push_annotated(Line::from(text.to_string()).into(), &[]);
         cell
     }
 

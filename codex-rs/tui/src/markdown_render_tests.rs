@@ -591,6 +591,13 @@ fn list_ordered() {
 }
 
 #[test]
+fn empty_list_items_keep_their_markers() {
+    let rendered =
+        ["8.", "-\n  -", "> -\n>   -"].map(|source| plain_lines(&render_markdown_text(source)));
+    assert_debug_snapshot!("empty_list_items", rendered);
+}
+
+#[test]
 fn list_nested() {
     let text = render_markdown_text("- List item 1\n  - Nested list item 1\n");
     let expected = Text::from_iter([
@@ -751,15 +758,16 @@ fn inline_code_and_file_paths_follow_syntax_theme() {
         crate::terminal_palette::with_test_default_colors(colors, || {
             let styles = MarkdownStyles::for_theme(&theme);
             let code_style = styles.code;
+            let parser = pulldown_cmark::Parser::new(markdown).into_offset_iter();
             let mut writer = super::Writer::new(
                 markdown,
-                pulldown_cmark::Parser::new(markdown).into_offset_iter(),
                 /*wrap_width*/ Some(24),
                 /*cwd*/ None,
                 &|_| false,
             );
             writer.styles = styles;
-            writer.run();
+            let mut parser = parser;
+            writer.run(&mut parser);
             let lines = crate::terminal_hyperlinks::visible_lines(writer.text);
             let paths = lines
                 .iter()

@@ -7,7 +7,6 @@ use crate::render::highlight::syntax_theme_revision;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::LinePrefixPolicy;
 use crate::terminal_hyperlinks::LogicalLineSource;
-use ratatui::text::Span;
 use std::sync::Arc;
 
 /// An append-only fence whose original source is identical to pulldown-cmark's code text.
@@ -79,7 +78,7 @@ impl OpenCodeFence {
     /// Append code only while the caller's newline-committed source extends this same fence.
     ///
     /// Returning `None` consumes the retained state and requires a canonical whole-fence render.
-    /// Successful lines include the empty indent span expected by the canonical Markdown writer.
+    /// Successful lines retain the canonical Markdown writer's copy metadata.
     pub(super) fn append(
         mut self,
         raw_source: &str,
@@ -109,11 +108,9 @@ impl OpenCodeFence {
         let copy = Arc::new(copy);
         let lines = lines
             .into_iter()
-            .map(|mut line| {
+            .map(|line| {
                 let mut source = LogicalLineSource::from_line(&line);
                 source.copy = Some(Arc::clone(&copy));
-                // The canonical writer installs an empty indent span for top-level fences.
-                line.spans.insert(/*index*/ 0, Span::default());
                 let mut line = HyperlinkLine::new(line);
                 line.prefix_policy = LinePrefixPolicy::Omit;
                 line.source = Some(source);

@@ -32,6 +32,7 @@ pub use feature_configs::NetworkProxyDomainPermissionToml;
 pub use feature_configs::NetworkProxyModeToml;
 pub use feature_configs::NetworkProxyUnixSocketPermissionToml;
 pub use feature_configs::NonPrefixedMcpToolNamesConfigToml;
+pub use feature_configs::RemoteMessageBoardConfigToml;
 use feature_configs::RemovedAppsMcpPathOverrideConfigToml;
 pub use feature_configs::RolloutBudgetConfigToml;
 pub use feature_configs::SleepToolConfigToml;
@@ -167,6 +168,8 @@ pub enum Feature {
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
     ShellSnapshot,
+    /// Restore bundled tools to PATH after Codex's login shell starts.
+    LoginShellPackagePath,
     /// Expose the selected PowerShell execution host's bounded major/minor version.
     PowerShellShellVersion,
     /// Keep policy-filtered shell snapshots entirely in executor memory.
@@ -328,11 +331,16 @@ pub enum Feature {
     /// Removed compatibility flag for always-on thread-owned Guardian context.
     GuardianThreadContext,
     /// Reuse encrypted parent compaction when restarting Guardian review sessions.
+    /// When disabled, retain an independent review transcript across parent compaction.
     GuardianReuseParentCompaction,
+    /// Limit worker Guardian root evidence to preceding root communication windows.
+    GuardianRootHandoffContext,
     /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
     GuardianEnhancedNodeReplTranscripts,
     /// Include completed node_repl or cua_repl Code Mode response images in Guardian reviews.
     GuardianNodeReplTranscriptImages,
+    /// Give Guardian access to the root conversation's message history tools.
+    GuardianConversationHistoryTools,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
     /// Removed compatibility flag for the unused Guardian extension prototype.
@@ -515,7 +523,7 @@ impl Features {
     }
 
     /// Returns whether persistent execution is enabled for the selected effort.
-    pub fn persistent_mode_enabled(&self, reasoning_effort: Option<&ReasoningEffort>) -> bool {
+    pub fn persistent_execution_enabled(&self, reasoning_effort: Option<&ReasoningEffort>) -> bool {
         reasoning_effort == Some(&ReasoningEffort::Persistent)
     }
 
@@ -1011,6 +1019,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "shell_snapshot",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::LoginShellPackagePath,
+        key: "login_shell_package_path",
+        stage: Stage::Experimental {
+            name: "Bundled tools in login shells",
+            menu_description: "Keep bundled tools such as ripgrep available when login shell startup resets PATH.",
+            announcement: "",
+        },
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::PowerShellShellVersion,
@@ -1659,6 +1677,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::GuardianRootHandoffContext,
+        key: "guardian_root_handoff_context",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::GuardianEnhancedNodeReplTranscripts,
         key: "guardian_enhanced_node_repl_transcripts",
         stage: Stage::UnderDevelopment,
@@ -1667,6 +1691,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianNodeReplTranscriptImages,
         key: "guardian_node_repl_transcript_images",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianConversationHistoryTools,
+        key: "guardian_conversation_history_tools",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

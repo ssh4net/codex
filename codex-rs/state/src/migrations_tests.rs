@@ -1,7 +1,9 @@
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
 use sqlx::Connection;
 use sqlx::Row;
+use sqlx::SqlSafeStr;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
@@ -9,6 +11,7 @@ use std::borrow::Cow;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
+use super::run_migrations_with_line_ending_compatibility;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
@@ -1012,6 +1015,128 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
     read_pool.close().await;
     pool.close().await;
     repair_result.expect("current migration history should not need the writer slot");
+}
+
+#[tokio::test]
+async fn repairs_migration_checksums_from_crlf_checkout_without_losing_data() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 1)
+        .run(&pool)
+        .await
+        .expect("first migration should apply");
+    sqlx::query(
+        r#"
+INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, source, model_provider, cwd,
+    title, sandbox_policy, approval_mode
+) VALUES ('preserved', '/tmp/preserved.jsonl', 1, 2, 'cli', 'openai', '/tmp',
+          'preserved thread', 'read-only', 'on-request')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("existing thread should insert");
+
+    let migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1)
+        .expect("first migration should exist");
+    let crlf_migration = Migration::new(
+        migration.version,
+        migration.description.clone(),
+        migration.migration_type,
+        AssertSqlSafe(migration.sql.as_str().replace('\n', "\r\n")).into_sql_str(),
+        migration.no_tx,
+    );
+    assert_ne!(crlf_migration.checksum, migration.checksum);
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+        .bind(crlf_migration.checksum.as_ref())
+        .bind(migration.version)
+        .execute(&pool)
+        .await
+        .expect("simulated CRLF checksum should be stored");
+
+    run_migrations_with_line_ending_compatibility(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("CRLF-only checksum mismatch should be repaired");
+
+    let repaired_checksum =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(migration.version)
+            .fetch_one(&pool)
+            .await
+            .expect("repaired checksum should load");
+    let preserved_thread_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM threads WHERE id = 'preserved' AND title = 'preserved thread'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("existing thread should remain readable");
+    assert_eq!(repaired_checksum, migration.checksum.as_ref());
+    assert_eq!(preserved_thread_count, 1);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn rejects_non_line_ending_migration_checksum_mismatch_without_repairing_it() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 1)
+        .run(&pool)
+        .await
+        .expect("first migration should apply");
+    let invalid_checksum = vec![0; 48];
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+        .bind(&invalid_checksum)
+        .execute(&pool)
+        .await
+        .expect("invalid checksum should be stored for this test");
+
+    let error = run_migrations_with_line_ending_compatibility(&pool, &STATE_MIGRATOR)
+        .await
+        .expect_err("unrelated checksum mismatch should remain an error");
+    let stored_checksum =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("stored checksum should remain readable");
+    let applied_versions = sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("applied versions should load");
+    assert_eq!(
+        error.to_string(),
+        "migration 1 was previously applied but has been modified"
+    );
+    assert_eq!(stored_checksum, invalid_checksum);
+    assert_eq!(applied_versions, vec![1]);
+
+    pool.close().await;
 }
 
 #[tokio::test]

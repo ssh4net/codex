@@ -55,8 +55,17 @@ fn copying_wrapped_text_preserves_only_hard_newlines() {
         /*x*/ 0, /*y*/ 0, /*width*/ 9, /*height*/ 64,
     );
     let mut view = crate::transcript_view::TranscriptView::default();
+    view.set_presentation(
+        /*detailed*/ true,
+        crate::history_cell::HistoryRenderMode::Rich,
+    );
     view.render(area, &mut Buffer::empty(area), &cells);
-    view.begin_selection(&cells, /*column*/ 2, /*row*/ 0, /*clicks*/ 1);
+    view.begin_selection(
+        &cells,
+        /*column*/ expected.column_for_offset(0),
+        /*row*/ 0,
+        /*clicks*/ 1,
+    );
     view.extend_selection(/*column*/ 8, /*row*/ 63);
     assert_eq!(view.selected_text(&cells).as_deref(), Some(expected.text()));
 }

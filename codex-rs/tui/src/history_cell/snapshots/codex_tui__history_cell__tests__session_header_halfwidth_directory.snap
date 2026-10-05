@@ -1,6 +1,5 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1903
 expression: "format!(\"{buf:?}\")"
 ---
 Buffer {
@@ -12,6 +11,7 @@ Buffer {
     ],
     styles: [
         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 1, fg: Rgb(99, 168, 248), bg: Reset, underline: Reset, modifier: NONE,
         x: 5, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
         x: 17, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
         x: 25, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,

@@ -64,6 +64,7 @@ const BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE: &str =
     "background_paginated_rollout_migration";
 
 const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
+    "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "auth_elicitation",
     BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE,
@@ -207,7 +208,6 @@ impl ConfigRequestProcessor {
         let provider = create_model_provider(config.model_provider, /*auth_manager*/ None);
         let capabilities = provider.capabilities();
         Ok(ModelProviderCapabilitiesReadResponse {
-            namespace_tools: capabilities.namespace_tools,
             image_generation: capabilities.image_generation,
             web_search: capabilities.web_search,
         })
@@ -1217,6 +1217,7 @@ client_id = "mcp-client"
                     codex_config::WindowsSandboxImplementationToml::Elevated,
                     codex_config::WindowsSandboxImplementationToml::Unelevated,
                 ]),
+                allow_mxc: None,
             }),
             ..ConfigRequirementsToml::default()
         });

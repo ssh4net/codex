@@ -16,5 +16,4 @@ expression: buffer_text(&buffer)
        long draft
 
 
-  enter submit   ctrl+] discard
-  shift+→ main prompt
+  enter submit   ⌃] discard   ⇧→ main prompt

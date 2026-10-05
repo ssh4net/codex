@@ -55,6 +55,7 @@ fn detail_thread_ids<'a>(threads: impl Iterator<Item = &'a Thread>) -> Vec<Threa
 
 impl App {
     pub(super) fn remove_agents_overview_thread(&mut self, thread_id: ThreadId) {
+        self.prepare_agents_overview_removal(&std::collections::HashSet::from([thread_id]));
         self.agents_overview.removed_threads.insert(thread_id);
         if let Some(Some(thread)) = self.agents_overview.threads.remove(&thread_id)
             && !thread.ephemeral
@@ -120,6 +121,9 @@ impl App {
             }
             ServerNotification::ThreadArchived(_) | ServerNotification::ThreadDeleted(_) => {
                 self.agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
+                self.agents_overview
                     .selected_permission_profiles
                     .remove(&thread_id);
                 self.agents_overview.activity.remove(&thread_id);
@@ -132,6 +136,9 @@ impl App {
                 self.agents_overview.removed_threads.remove(&thread_id);
             }
             ServerNotification::ThreadClosed(_) => {
+                self.agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
                 self.agents_overview.activity.remove(&thread_id);
                 if let Some(usage) = self.agents_overview.usage.get_mut(&thread_id) {
                     usage.tokens = None;
@@ -160,6 +167,10 @@ impl App {
             }
             ServerNotification::ThreadSettingsUpdated(settings) => {
                 if !self.pending_server_profiles.contains_key(&thread_id)
+                    && !self
+                        .agents_overview
+                        .requested_permission_profiles
+                        .contains_key(&thread_id)
                     && self
                         .agents_overview
                         .selected_permission_profiles

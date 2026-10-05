@@ -87,6 +87,7 @@ use codex_rollout::state_db;
 use codex_tools::ToolName;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::truncate_mcp_tool_result;
 use codex_utils_output_truncation::truncate_text;
 use codex_utils_path_uri::PathUri;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
@@ -874,6 +875,12 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
         codex_linux_sandbox_exe: prepared_call.config().codex_linux_sandbox_exe.clone(),
         sandbox_cwd,
         use_legacy_landlock: prepared_call.config().use_legacy_landlock,
+        use_mxc: prepared_call
+            .config()
+            .environment_use_mxc
+            .get(server_environment_id)
+            .copied()
+            .unwrap_or(false),
     })?;
 
     match meta.as_mut() {
@@ -976,39 +983,11 @@ fn truncate_mcp_tool_result_for_event(
     result: &Result<CallToolResult, String>,
 ) -> Result<CallToolResult, String> {
     match result {
-        Ok(call_tool_result) => {
-            // The app-server rebuilds `ThreadItem::McpToolCall` from this item,
-            // so avoid persisting multi-megabyte results in rollout storage.
-            let Ok(serialized) = serde_json::to_string(call_tool_result) else {
-                return Ok(call_tool_result.clone());
-            };
-            if serialized.len() <= MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES {
-                return Ok(call_tool_result.clone());
-            }
-
-            // A huge MCP result can put bytes in `content`, `structuredContent`,
-            // or `_meta`. Collapse the event copy to a text preview of the whole
-            // serialized result so the UI still has useful context without
-            // preserving a multi-megabyte structured payload.
-            //
-            // This budget applies to the preview text, not the final event JSON.
-            // The preview is itself serialized into a JSON string, so quotes and
-            // backslashes can be escaped again and the stored event may end up
-            // somewhat larger than this byte budget.
-            let truncated = truncate_text(
-                &serialized,
-                TruncationPolicy::Bytes(MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES),
-            );
-            Ok(CallToolResult {
-                content: vec![serde_json::json!({
-                    "type": "text",
-                    "text": truncated,
-                })],
-                structured_content: None,
-                is_error: call_tool_result.is_error,
-                meta: None,
-            })
-        }
+        Ok(call_tool_result) => Ok(truncate_mcp_tool_result(
+            call_tool_result,
+            MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES,
+        )
+        .into_owned()),
         Err(message) => Err(truncate_text(
             message,
             TruncationPolicy::Bytes(MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES),
@@ -1491,16 +1470,7 @@ async fn maybe_request_mcp_tool_approval(
     policy: McpToolApprovalPolicy,
 ) -> Option<ReviewDecision> {
     let turn_context = &step_context.turn;
-    let turn_state = sess
-        .active_turn
-        .lock()
-        .await
-        .as_ref()
-        .map(|active| Arc::clone(&active.turn_state));
-    let strict_auto_review = match turn_state {
-        Some(turn_state) => turn_state.lock().await.strict_auto_review_enabled(),
-        None => false,
-    };
+    let strict_auto_review = turn_context.strict_auto_review_enabled();
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
         &config.config_layer_stack,
         step_context

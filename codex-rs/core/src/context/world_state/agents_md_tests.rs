@@ -46,6 +46,8 @@ fn wsl_case_alias_does_not_replace_unchanged_instructions() {
     };
 
     assert!(
-        WorldStateSection::render_diff(&current, PreviousSectionState::Known(&previous)).is_none()
+        WorldStateSection::render_diff(&current, PreviousSectionState::Known(&previous))
+            .0
+            .is_none()
     );
 }

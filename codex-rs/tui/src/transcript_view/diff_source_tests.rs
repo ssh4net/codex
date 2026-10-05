@@ -48,10 +48,21 @@ fn annotated_diff_preserves_the_existing_hard_wrapped_visual_output() {
     let area = Rect::new(
         /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 8,
     );
+    let layout = TextLayout::new(lines.clone(), /*width*/ 40);
     let mut expected = Buffer::empty(area);
     HyperlinkParagraph::new(&lines, Style::default()).render(area, &mut expected);
+    let header_rows = TextLayout::new(vec![lines[0].clone()], /*width*/ 40).row_count();
+    expected.set_style(
+        Rect::new(
+            /*x*/ 0,
+            /*y*/ header_rows as u16,
+            /*width*/ 40,
+            /*height*/ (layout.row_count() - header_rows) as u16,
+        ),
+        lines[1].line.style,
+    );
     let mut actual = Buffer::empty(area);
-    TextLayout::new(lines, /*width*/ 40).render(area, &mut actual, /*start_row*/ 0);
+    layout.render(area, &mut actual, /*start_row*/ 0);
     assert_eq!(actual, expected);
 }
 

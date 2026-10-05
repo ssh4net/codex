@@ -100,7 +100,7 @@ fn preview_counts_newline_dense_output() {
     assert_eq!(rendered, PREVIEW_LINES);
     assert_eq!(
         preview.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["", "", "", "+99997 lines (ctrl+t to view transcript)"],
+        ["", "", "", "+99997 lines (⌃t to view transcript)"],
     );
 }
 
@@ -128,7 +128,7 @@ fn preview_caps_combining_text_across_styled_spans() {
         visible_lines(preview),
         vec![
             expected_line,
-            "+2 lines (ctrl+t to view transcript)".dim().into()
+            "+2 lines (⌃t to view transcript)".dim().into()
         ],
     );
 }

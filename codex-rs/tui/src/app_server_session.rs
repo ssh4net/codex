@@ -180,6 +180,11 @@ pub(crate) enum ForkPermissionMode {
     OverrideFromCurrentConfig,
 }
 
+enum EmptyCatalogFallback {
+    Error,
+    ManagedNewThread,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ForkPresentation {
     Regular,
@@ -542,6 +547,7 @@ impl AppServerSession {
             DynamicToolMcpServer::start(
                 self.request_handle(),
                 thread_start_params,
+                config.features.get().clone(),
                 app_event_tx,
                 status_updates,
                 managed_requirement,
@@ -642,6 +648,19 @@ impl AppServerSession {
         Ok(bootstrap)
     }
 
+    pub(crate) async fn bootstrap_for_new_thread(
+        &mut self,
+        config: &Config,
+    ) -> Result<AppServerBootstrap> {
+        let started_at = Instant::now();
+        let account = self.read_account().await?;
+        let mut bootstrap = self
+            .bootstrap_with_account_inner(config, account, EmptyCatalogFallback::ManagedNewThread)
+            .await?;
+        bootstrap.duration = started_at.elapsed();
+        Ok(bootstrap)
+    }
+
     /// Bootstraps using a previously read account.
     ///
     /// Callers must discard a prefetched account after authentication, server, or provider changes.
@@ -649,6 +668,16 @@ impl AppServerSession {
         &mut self,
         config: &Config,
         account: GetAccountResponse,
+    ) -> Result<AppServerBootstrap> {
+        self.bootstrap_with_account_inner(config, account, EmptyCatalogFallback::Error)
+            .await
+    }
+
+    async fn bootstrap_with_account_inner(
+        &mut self,
+        config: &Config,
+        account: GetAccountResponse,
+        fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         // `hooks/list` holds the global config queue during startup. Submit models and config
@@ -689,15 +718,19 @@ impl AppServerSession {
             },
             async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
-        self.managed_new_thread_defaults = requirements
-            .requirements
-            .and_then(|requirements| requirements.models)
-            .and_then(|models| models.new_thread);
-        let available_models = models
+        let mut available_models = models
             .data
             .into_iter()
             .map(model_preset_from_api_model)
             .collect::<Vec<_>>();
+        crate::service_tier_resolution::constrain_server_service_tiers(
+            &mut available_models,
+            &requirements,
+        );
+        self.managed_new_thread_defaults = requirements
+            .requirements
+            .and_then(|requirements| requirements.models)
+            .and_then(|models| models.new_thread);
         let default_model = config
             .model
             .clone()
@@ -708,6 +741,13 @@ impl AppServerSession {
                     .map(|model| model.model.clone())
             })
             .or_else(|| available_models.first().map(|model| model.model.clone()))
+            .or_else(|| match fallback {
+                EmptyCatalogFallback::Error => None,
+                EmptyCatalogFallback::ManagedNewThread => self
+                    .managed_new_thread_defaults
+                    .as_ref()
+                    .and_then(|defaults| defaults.model.clone()),
+            })
             .wrap_err("No models are available. Set `model` explicitly or check your model catalog configuration.")?;
         self.default_model = Some(default_model.clone());
         self.available_models = available_models.clone();
@@ -1399,6 +1439,8 @@ impl AppServerSession {
                     disabled_plugin_ids: None,
                     thread_id: thread_id.to_string(),
                     turn_trigger: Some("user".to_string()),
+                    parent_turn_id: None,
+                    root_turn_id: None,
                     client_user_message_id: Some(client_user_message_id),
                     input: items,
                     tool_output: None,
@@ -1858,7 +1900,7 @@ pub(crate) fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
                 description: effort.description,
             })
             .collect(),
-        supports_personality: model.supports_personality,
+        supports_personality: false,
         additional_speed_tiers: model.additional_speed_tiers,
         service_tiers: model
             .service_tiers
@@ -4078,6 +4120,7 @@ mod tests {
                 name: None,
                 turns: vec![Turn {
                     id: "turn-1".to_string(),
+                    root_turn_id: None,
                     items_view: codex_app_server_protocol::TurnItemsView::Full,
                     items: vec![
                         codex_app_server_protocol::ThreadItem::UserMessage {

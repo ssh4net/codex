@@ -875,7 +875,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         cyber_access_program,
     } = args;
 
-    if config.daybreak_enabled && !matches!(&command, Some(ExecCommand::Review(_))) {
+    if config.features.enabled(Feature::CliDaybreak)
+        && config.daybreak_enabled
+        && !matches!(&command, Some(ExecCommand::Review(_)))
+    {
         anyhow::ensure!(
             !oss || matches!(
                 &command,
@@ -1174,8 +1177,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // is using.
     event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
     if !json_mode
-        && let Some(message) =
-            codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
+        && let Some(message) = codex_core::config::system_bwrap_warning(
+            &config.permissions.effective_permission_profile(),
+            &config.cwd,
+        )
     {
         event_processor.process_warning(message);
     }
@@ -1208,7 +1213,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         } => {
             let cyber_access_program = match cyber_access_program {
                 Some(program) => Some(program),
-                None => {
+                None if config.features.enabled(Feature::CliDaybreak) => {
                     daybreak::program_for_turn(
                         &client,
                         &mut request_ids,
@@ -1218,6 +1223,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     )
                     .await?
                 }
+                None => None,
             };
             let response: TurnStartResponse = send_request_with_response(
                 &client,
@@ -1227,6 +1233,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
                         turn_trigger: Some("exec".to_string()),
+                        parent_turn_id: None,
+                        root_turn_id: None,
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
                         tool_output: None,
@@ -1857,6 +1865,7 @@ async fn resolve_resume_thread_id(
                 ClientRequest::ThreadList {
                     request_id: RequestId::Integer(0),
                     params: ThreadListParams {
+                        excluded_thread_ids: None,
                         originators: None,
                         cursor,
                         limit: Some(100),
@@ -1943,6 +1952,7 @@ async fn resolve_resume_thread_id(
             ClientRequest::ThreadList {
                 request_id: RequestId::Integer(0),
                 params: ThreadListParams {
+                    excluded_thread_ids: None,
                     originators: None,
                     cursor,
                     limit: Some(100),

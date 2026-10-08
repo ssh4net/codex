@@ -7,6 +7,8 @@ use tokio::time::Instant;
 
 #[derive(Debug)]
 pub enum GuardianReviewOutcome {
+    /// Approved by current async evidence after the redundant attempt was drained.
+    CachedApproval,
     Completed(GuardianAssessment),
     Error(GuardianReviewError),
 }
@@ -87,6 +89,7 @@ pub enum GuardianReviewSessionOutcome {
     },
     TimedOut,
     Aborted,
+    StaleAuthorization,
 }
 
 impl From<GuardianReviewSessionOutcome> for GuardianReviewOutcome {
@@ -123,6 +126,9 @@ impl From<GuardianReviewSessionOutcome> for GuardianReviewOutcome {
             }),
             GuardianReviewSessionOutcome::TimedOut => Self::Error(GuardianReviewError::Timeout),
             GuardianReviewSessionOutcome::Aborted => Self::Error(GuardianReviewError::Cancelled),
+            GuardianReviewSessionOutcome::StaleAuthorization => {
+                Self::Error(GuardianReviewError::StaleAuthorization)
+            }
         }
     }
 }

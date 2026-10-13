@@ -25,6 +25,29 @@ async fn unavailable_send_keeps_answer_and_skip_remains_available() {
 }
 
 #[tokio::test]
+async fn collapsed_question_discard_clears_all_without_sending_or_losing_main_draft() {
+    for blocks_direct_input in [false, true] {
+        let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.bottom_pane
+            .set_composer_text("main draft".into(), Vec::new(), Vec::new());
+        chat.add_async_questions("message", &questions());
+        assert_eq!(question_count(&chat), 2);
+        assert!(!chat.bottom_pane.questions.as_ref().unwrap().expanded);
+
+        chat.blocks_direct_input = blocks_direct_input;
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+
+        assert_eq!(question_count(&chat), 0);
+        assert_eq!(chat.bottom_pane.composer_text(), "main draft");
+        assert!(chat.input_queue.queued_user_messages.is_empty());
+        assert!(op_rx.try_recv().is_err());
+
+        chat.add_async_questions("message", &questions());
+        assert_eq!(question_count(&chat), 0);
+    }
+}
+
+#[tokio::test]
 async fn accepted_question_answer_uses_existing_delivery_and_keeps_main_draft() {
     for queued in [false, true] {
         let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

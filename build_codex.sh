@@ -12,7 +12,7 @@ set -euo pipefail
 # Optional overrides:
 #   CODEX_SOURCE_ROOT, CODEX_TARGET, CODEX_HOME, CODEX_INSTALL_DIR
 #   CODEX_PACKAGE_VERSION, CODEX_FORCE_PACKAGE, CODEX_PYTHON, CODEX_RG_BIN
-#   CODEX_ZSH_BIN, CODEX_V8_CACHE_DIR
+#   CODEX_V8_CACHE_DIR
 
 source_root="${CODEX_SOURCE_ROOT:-$PWD}"
 source_root="$(cd "$source_root" && pwd -P)"
@@ -140,10 +140,6 @@ if [[ -z "$rg_bin" ]]; then
 fi
 if [[ -n "$rg_bin" ]]; then
     package_args+=(--rg-bin "$rg_bin")
-fi
-
-if [[ -n "${CODEX_ZSH_BIN:-}" ]]; then
-    package_args+=(--zsh-bin "$CODEX_ZSH_BIN")
 fi
 
 if [[ "${CODEX_FORCE_PACKAGE:-0}" == "1" ]]; then

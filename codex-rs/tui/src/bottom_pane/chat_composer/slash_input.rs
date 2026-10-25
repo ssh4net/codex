@@ -225,11 +225,13 @@ impl ChatComposer {
     }
 
     pub fn set_daybreak_command_description(&mut self, description: Option<&'static str>) {
-        self.popups.daybreak_command_description = description;
+        self.update_slash_command_catalog(|composer| {
+            composer.popups.daybreak_command_description = description
+        });
     }
 
     pub fn set_worktrees_enabled(&mut self, enabled: bool) {
-        self.worktrees_enabled = enabled;
+        self.update_slash_command_catalog(|composer| composer.worktrees_enabled = enabled);
     }
 
     /// Handle key event when the slash-command popup is visible.

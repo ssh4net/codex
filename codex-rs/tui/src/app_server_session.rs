@@ -4,6 +4,7 @@
 //! request/response plumbing out of `App` and `ChatWidget`.
 
 mod daybreak_api_key_compat;
+mod events;
 mod external_agent_config;
 pub(crate) mod fs;
 mod history;
@@ -22,6 +23,7 @@ mod web_search;
 #[path = "app_server_session/collaboration_catalog_tests.rs"]
 mod collaboration_catalog_tests;
 
+pub(crate) use events::AppServerSessionEvent;
 pub(crate) use history::HISTORY_ITEM_PAGE_LIMIT;
 pub(crate) use history::HISTORY_ITEM_SCAN_LIMIT;
 pub(crate) use history::HistoryHydrationScope;
@@ -43,7 +45,6 @@ use crate::status::StatusAccountDisplay;
 use crate::status::plan_type_display_name;
 use crate::terminal_visualization_instructions::with_terminal_visualization_instructions;
 use codex_app_server_client::AppServerClient;
-use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerPath;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
@@ -319,9 +320,11 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) collaboration_modes: Vec<codex_protocol::config_types::CollaborationModeMask>,
+    pub(crate) allowed_approval_policies: Option<Vec<AskForApproval>>,
 }
 
 pub(crate) struct AppServerSession {
+    backend_id: crate::backend_id::BackendId,
     client: AppServerClient,
     next_request_id: i64,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
@@ -385,6 +388,17 @@ pub(crate) fn is_active_writer_error(err: &color_eyre::eyre::Report) -> bool {
         .any(|cause| cause.to_string().contains("already has an active writer"))
 }
 
+/// Recognizes a draining server's refusal, using the legacy message only when data is absent.
+pub(crate) fn is_server_shutting_down_error(error: &JSONRPCErrorError) -> bool {
+    error.code == JSONRPC_INVALID_REQUEST
+        && match &error.data {
+            Some(data) => {
+                data.get("reason").and_then(serde_json::Value::as_str) == Some("serverShuttingDown")
+            }
+            None => error.message == "Server is draining; retry after reconnecting",
+        }
+}
+
 pub(crate) fn source_agent_path(source: &SessionSource) -> Option<String> {
     match source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. }) => {
@@ -428,8 +442,13 @@ impl AppServerSession {
         self.client.platform_os()
     }
 
-    pub(crate) fn new(client: AppServerClient, thread_params_mode: ThreadParamsMode) -> Self {
+    pub(crate) fn new(
+        backend_id: crate::backend_id::BackendId,
+        client: AppServerClient,
+        thread_params_mode: ThreadParamsMode,
+    ) -> Self {
         Self {
+            backend_id,
             client,
             next_request_id: 1,
             history_pagination: HashMap::new(),
@@ -449,6 +468,10 @@ impl AppServerSession {
             dynamic_tool_mcp: None,
             worktree_source_config_builder: None,
         }
+    }
+
+    pub(crate) fn backend_id(&self) -> crate::backend_id::BackendId {
+        self.backend_id
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(
@@ -737,6 +760,10 @@ impl AppServerSession {
                 )
                 .await;
         }
+        let allowed_approval_policies = requirements
+            .requirements
+            .as_ref()
+            .and_then(|requirements| requirements.allowed_approval_policies.clone());
         self.managed_new_thread_defaults = requirements
             .requirements
             .and_then(|requirements| requirements.models)
@@ -799,7 +826,7 @@ impl AppServerSession {
                     true,
                 )
             }
-            Some(Account::AmazonBedrock { .. }) => {
+            Some(Account::AmazonBedrock { .. } | Account::Gcp {}) => {
                 (None, None, None, None, FeedbackAudience::External, false)
             }
             None => (None, None, None, None, FeedbackAudience::External, false),
@@ -816,6 +843,7 @@ impl AppServerSession {
             has_chatgpt_account,
             available_models,
             collaboration_modes,
+            allowed_approval_policies,
         })
     }
 
@@ -844,8 +872,14 @@ impl AppServerSession {
             .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
     }
 
-    pub(crate) async fn next_event(&mut self) -> Option<AppServerEvent> {
-        self.client.next_event().await
+    pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
+        self.client
+            .next_event()
+            .await
+            .map(|event| AppServerSessionEvent {
+                backend_id: self.backend_id,
+                event,
+            })
     }
 
     #[cfg(test)]
@@ -1823,11 +1857,13 @@ pub(crate) async fn start_thread_with_request_handle(
     launch_choices: StartupLaunchChoices,
 ) -> Result<AppServerStartedThread> {
     let request_id = RequestId::String(format!("startup-thread-start-{}", Uuid::new_v4()));
-    let mut params = thread_start_params_from_config(
+    let mut params = thread_start_params_with_reviewer(
         &config,
         thread_params_mode,
         remote_cwd_override.as_deref(),
         /*session_start_source*/ None,
+        launch_choices.approvals_reviewer,
+        &launch_choices.approval_policy,
     );
     thread_tool_transport.validate_config(&config)?;
     launch_choices.configure(&mut params);
@@ -2149,6 +2185,24 @@ pub(crate) fn thread_start_params_from_config(
     remote_cwd_override: Option<&std::path::Path>,
     session_start_source: Option<ThreadStartSource>,
 ) -> ThreadStartParams {
+    thread_start_params_with_reviewer(
+        config,
+        thread_params_mode,
+        remote_cwd_override,
+        session_start_source,
+        startup_launch::StartupApprovalsReviewer::Config,
+        &startup_launch::StartupApprovalPolicy::ResolvedConfig,
+    )
+}
+
+fn thread_start_params_with_reviewer(
+    config: &Config,
+    thread_params_mode: ThreadParamsMode,
+    remote_cwd_override: Option<&std::path::Path>,
+    session_start_source: Option<ThreadStartSource>,
+    reviewer_source: startup_launch::StartupApprovalsReviewer,
+    policy_source: &startup_launch::StartupApprovalPolicy,
+) -> ThreadStartParams {
     let permissions = permissions_selection_from_config(config, thread_params_mode);
     let sandbox = permissions
         .is_none()
@@ -2165,8 +2219,19 @@ pub(crate) fn thread_start_params_from_config(
         service_tier: service_tier_override_from_config(config),
         cwd: thread_cwd_from_config(config, thread_params_mode, remote_cwd_override),
         runtime_workspace_roots: thread_params_mode.workspace_roots_from_config(config),
-        approval_policy: Some(config.permissions.approval_policy.value().into()),
-        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        approval_policy: match policy_source {
+            startup_launch::StartupApprovalPolicy::ResolvedConfig => {
+                Some(config.permissions.approval_policy.value().into())
+            }
+            startup_launch::StartupApprovalPolicy::Invocation(policy) => *policy,
+            startup_launch::StartupApprovalPolicy::ConfigOverride(_) => None,
+        },
+        approvals_reviewer: match reviewer_source {
+            startup_launch::StartupApprovalsReviewer::Config => {
+                approvals_reviewer_override_from_config(config)
+            }
+            startup_launch::StartupApprovalsReviewer::Invocation(reviewer) => reviewer,
+        },
         sandbox,
         permissions,
         config: config_request_overrides_from_config(config, thread_params_mode),

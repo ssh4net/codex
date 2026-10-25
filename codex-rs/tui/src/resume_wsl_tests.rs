@@ -51,8 +51,10 @@ async fn picker_cwd_restores_wsl_spelling_before_resume_or_fork() -> color_eyre:
             .await?;
 
         for action in [CwdPromptAction::Resume, CwdPromptAction::Fork] {
+            let backend_id = crate::backend_id::BackendId::new();
             let target = resume_picker::SessionTarget {
                 path: None,
+                backend_id,
                 thread_id: ThreadId::new(),
                 cwd: Some(saved_cwd.clone()),
                 history_mode: None,
@@ -63,6 +65,7 @@ async fn picker_cwd_restores_wsl_spelling_before_resume_or_fork() -> color_eyre:
             };
             let mut tui = tui::test_support::make_test_tui()?;
             let outcome = resolve_startup_resume_or_fork_cwd(
+                backend_id,
                 &mut tui,
                 &config,
                 /*app_server*/ None,

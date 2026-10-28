@@ -165,7 +165,7 @@ credential_masking = true
         let EventMsg::Warning(warning) = warning else {
             unreachable!("waited for a credential masking warning")
         };
-        insta::assert_snapshot!(warning.message, @"Credential masking is unavailable on environment `remote` because its exec-server does not support it. This command will run with unmasked credentials.");
+        insta::assert_snapshot!(warning.message, @"Credential masking is unavailable for this shell startup on environment `remote`. This command will run with unmasked credentials.");
     }
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))

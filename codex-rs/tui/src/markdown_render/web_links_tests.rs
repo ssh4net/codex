@@ -68,6 +68,7 @@ fn bare_urls_keep_link_style_when_wrapped_in_tables() {
 
 fn terminal(name: TerminalName) -> TerminalInfo {
     TerminalInfo {
+        backend: None,
         name,
         term_program: None,
         version: None,

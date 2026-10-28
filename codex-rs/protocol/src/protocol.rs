@@ -646,6 +646,45 @@ pub enum AdditionalContextKind {
 pub struct AdditionalContextEntry {
     pub value: String,
     pub kind: AdditionalContextKind,
+    /// Optional name for untrusted context, used to label its tool output.
+    pub name: Option<String>,
+}
+
+impl AdditionalContextEntry {
+    /// Creates an unnamed context entry.
+    pub fn new(value: String, kind: AdditionalContextKind) -> Self {
+        Self {
+            value,
+            kind,
+            name: None,
+        }
+    }
+
+    /// Sets the name for untrusted context.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Validates the optional untrusted-context name before input admission.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let Some(name) = &self.name else {
+            return Ok(());
+        };
+        if self.kind == AdditionalContextKind::Application {
+            return Err("additional context name is only supported for untrusted context");
+        }
+        if name.is_empty()
+            || name.len() > 64
+            || !name.as_bytes()[0].is_ascii_lowercase()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err("additional context name must match [a-z][a-z0-9_]{0,63}");
+        }
+        Ok(())
+    }
 }
 
 /// Submission operation
@@ -737,6 +776,13 @@ pub enum Op {
         /// When present, report validation errors here instead of emitting an error event.
         /// Successful updates still emit `ThreadSettingsApplied` for all callers.
         reply: Option<oneshot::Sender<CodexResult<()>>>,
+    },
+
+    /// Replace the dynamic tool catalog without starting a turn.
+    #[debug("ReplaceDynamicTools")]
+    ReplaceDynamicTools {
+        tools: Vec<DynamicToolSpec>,
+        reply: oneshot::Sender<CodexResult<()>>,
     },
 
     /// Update only the named running turn, without changing future settings.
@@ -1057,6 +1103,7 @@ impl Op {
             Self::RecoverTurn { .. } => "recover_turn",
             Self::SuspendTurnAndShutdown { .. } => "suspend_turn_and_shutdown",
             Self::ThreadSettings { .. } => "thread_settings",
+            Self::ReplaceDynamicTools { .. } => "replace_dynamic_tools",
             Self::TurnSettings { .. } => "turn_settings",
             Self::InterAgentCommunication { .. } => "inter_agent_communication",
             Self::ExecApproval { .. } => "exec_approval",
@@ -1695,6 +1742,34 @@ pub enum EventMsg {
     SubAgentActivity(SubAgentActivityEvent),
 }
 
+impl EventMsg {
+    /// Returns the ID and start time of the command this approval opens.
+    /// Stdin and network reviews have their own prompts for an existing operation.
+    pub fn command_approval_start(&self) -> Option<(&str, i64)> {
+        match self {
+            Self::ExecApprovalRequest(request)
+                if request.approval_id.is_none() && request.network_approval_context.is_none() =>
+            {
+                Some((&request.call_id, request.started_at_ms))
+            }
+            Self::GuardianAssessment(assessment)
+                if assessment.status == GuardianAssessmentStatus::InProgress
+                    && matches!(
+                        assessment.action,
+                        GuardianAssessmentAction::Command { .. }
+                            | GuardianAssessmentAction::Execve { .. }
+                    ) =>
+            {
+                Some((
+                    assessment.target_item_id.as_deref()?,
+                    assessment.started_at_ms,
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, EnumIter)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEventName {
@@ -1982,6 +2057,8 @@ pub enum CodexErrorInfo {
     FlexUnavailable,
     ServerOverloaded,
     ModelNotFound,
+    /// Capacity is unavailable on a route restricted by server policy.
+    PolicyCapacityUnavailable,
     CyberPolicy,
     BioPolicy,
     MisalignmentPolicyViolation,
@@ -2028,6 +2105,7 @@ impl CodexErrorInfo {
             | Self::FlexUnavailable
             | Self::ServerOverloaded
             | Self::ModelNotFound
+            | Self::PolicyCapacityUnavailable
             | Self::CyberPolicy
             | Self::BioPolicy
             | Self::MisalignmentPolicyViolation
@@ -2965,6 +3043,9 @@ pub struct ImageGenerationEndEvent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<_>", optional)]
     pub input_images: Vec<ImageGenerationInputImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub generation_id: Option<String>,
 }
 
 // Conversation kept for backward compatibility.

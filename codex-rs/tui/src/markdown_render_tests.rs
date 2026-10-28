@@ -1467,10 +1467,7 @@ fn code_block_no_lang_plain() {
 fn code_block_multiple_lines_root() {
     let md = "```\nfirst\nsecond\n```\n";
     let text = render_markdown_text(md);
-    let expected = Text::from_iter([
-        Line::from("first"),
-        Line::from("second"),
-    ]);
+    let expected = Text::from_iter([Line::from("first"), Line::from("second")]);
     assert_eq!(text, expected);
 }
 

@@ -15,6 +15,7 @@ use codex_guardian_context::SectionInput;
 pub(crate) use codex_guardian_context::TranscriptCursor as GuardianTranscriptCursor;
 pub(crate) use codex_guardian_context::TranscriptMode as GuardianPromptMode;
 use codex_guardian_context::default_registry;
+#[cfg(test)]
 use codex_guardian_reviewer::GuardianPromptItems;
 use codex_protocol::models::ResponseItem;
 
@@ -24,7 +25,6 @@ use crate::context::NodeReplReviewEvidenceMode;
 use crate::context::is_guardian_context_message;
 use crate::context::node_repl_review_evidence_mode;
 use crate::session::session::Session;
-use codex_utils_output_truncation::approx_bytes_for_tokens;
 
 use super::ApprovalRequestReasons;
 use super::GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS;
@@ -34,7 +34,7 @@ use super::GuardianReviewContext;
 
 // Bound both JSON and permission evidence without restricting manual approvals.
 const MAX_GUARDIAN_ENVIRONMENT_ID_BYTES: usize = 256;
-pub(super) const GUARDIAN_TRANSCRIPT_START: &str = ">>> TRANSCRIPT START\n";
+pub(super) use codex_guardian_reviewer::GUARDIAN_TRANSCRIPT_START;
 
 /// Selects transcript evidence using the checkpoint already loaded by the reviewer.
 pub(crate) enum GuardianTranscriptHistory<'a> {
@@ -57,7 +57,7 @@ pub(crate) async fn build_guardian_prompt_items(
     request: GuardianApprovalRequest,
     mode: GuardianPromptMode,
 ) -> anyhow::Result<GuardianPromptItems> {
-    build_guardian_prompt_items_with_parent_turn(
+    let collected = collect_guardian_prompt_items_with_parent_turn(
         session,
         GuardianTranscriptHistory::Retained(session.conversation_history_snapshot().await.as_ref()),
         /*parent_context*/ None,
@@ -69,10 +69,28 @@ pub(crate) async fn build_guardian_prompt_items(
         mode,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
-    .await
+    .await?;
+    codex_guardian_reviewer::compose_guardian_prompt(
+        collected.sections,
+        &collected.profile,
+        collected.mode,
+        collected.history_version,
+        &collected.session_id,
+        collected.node_repl_evidence_sequence,
+    )
 }
 
-pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
+/// Captured request sources and host cursor facts, before request-size preparation.
+pub(super) struct CollectedGuardianPrompt {
+    pub(super) sections: CollectedContext,
+    pub(super) profile: ContextProfile,
+    pub(super) mode: GuardianPromptMode,
+    pub(super) history_version: u64,
+    pub(super) session_id: String,
+    pub(super) node_repl_evidence_sequence: u64,
+}
+
+pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
     session: &Session,
     transcript_history: GuardianTranscriptHistory<'_>,
     parent_context: Option<&GuardianReviewContext>,
@@ -80,7 +98,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     request: GuardianApprovalRequest,
     mode: GuardianPromptMode,
     reviewed_node_repl_evidence_sequence: u64,
-) -> anyhow::Result<GuardianPromptItems> {
+) -> anyhow::Result<CollectedGuardianPrompt> {
     let (history, use_parent_checkpoint) = match transcript_history {
         GuardianTranscriptHistory::Retained(history) => (history, false),
         GuardianTranscriptHistory::LoadedParentCheckpoint(history) => (history, true),
@@ -171,18 +189,18 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         permissions.as_ref(),
         node_repl_context.as_ref(),
     )?;
-    codex_guardian_reviewer::compose_guardian_prompt(
+    Ok(CollectedGuardianPrompt {
         sections,
-        &profile,
+        profile,
         mode,
-        if use_parent_checkpoint {
+        history_version: if use_parent_checkpoint {
             history.history_version()
         } else {
             history.review_history_version()
         },
-        &session.thread_id.to_string(),
+        session_id: session.thread_id.to_string(),
         node_repl_evidence_sequence,
-    )
+    })
 }
 
 /// Exercises the sync profile through the host's existing transcript tests.
@@ -333,11 +351,4 @@ impl SectionHistory for FilteredGuardianHistory<'_> {
     ) -> Option<GuardianRootMessage> {
         self.0.render_retained_assistant(message)
     }
-}
-
-pub(crate) fn guardian_truncate_text(content: &str, token_cap: usize) -> (String, bool) {
-    (
-        codex_guardian_context::truncate_text(content, token_cap),
-        content.len() > approx_bytes_for_tokens(token_cap),
-    )
 }

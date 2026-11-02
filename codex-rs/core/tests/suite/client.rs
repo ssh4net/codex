@@ -37,6 +37,7 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -528,7 +529,9 @@ async fn sends_audio_urls_to_responses() {
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Audio {
-            audio_url: audio_url.to_string(),
+            audio: AudioReference::Inline {
+                audio_url: audio_url.to_string(),
+            },
         }]))
         .await
         .unwrap();
@@ -3576,6 +3579,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
                 },
+                "last_usage_includes_reasoning": false,
                 // Default model is gpt-5.4 in tests → 95% usable context window
                 "model_context_window": 258400
             },

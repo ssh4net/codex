@@ -52,7 +52,6 @@ fn preview_preserves_hyperlinks_and_original_logical_source() {
             destination.clone(),
         )],
         source: Some(source.clone()),
-        prefix_policy: crate::terminal_hyperlinks::LinePrefixPolicy::Apply,
     });
     let preview = preview.finish_hyperlink_lines();
     assert_eq!(

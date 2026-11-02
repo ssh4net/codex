@@ -547,6 +547,9 @@ def _normalized_schema_bundle_text(schema_dir: Path) -> str:
                 required.remove(field)
         for name, definition in definitions.items():
             if isinstance(definition, dict):
+                if name == "ReviewDelivery":
+                    # Preserve ReviewDelivery.inline when only one delivery mode remains.
+                    definition["x-enum-field-as-literal"] = False
                 if name == "CodexErrorInfo":
                     _normalize_open_ended_enum(definition)
                 _flatten_string_enum_one_of(definition)
@@ -602,7 +605,7 @@ def generate_v2_all(schema_dir: Path, *, format_output: bool = True) -> None:
             + (["--formatters", "ruff-format"] if format_output else []),
             cwd=sdk_root() if format_output else Path(td),
         )
-    _preserve_inline_image_class_names(out_path)
+    _preserve_inline_media_class_names(out_path)
     _add_legacy_image_generation_thread_item_alias(out_path)
     _preserve_open_enum(out_path, "CodexErrorInfoValue", allow_empty=True)
     _preserve_reasoning_effort_enum(out_path)
@@ -611,13 +614,15 @@ def generate_v2_all(schema_dir: Path, *, format_output: bool = True) -> None:
     _normalize_generated_timestamps(out_path)
 
 
-def _preserve_inline_image_class_names(out_path: Path) -> None:
-    """Keep the public class names used before ImageReference was introduced."""
+def _preserve_inline_media_class_names(out_path: Path) -> None:
+    """Keep the public inline class names used before file references were introduced."""
     source = out_path.read_text()
     stable_names = {
         "UrlUserInput": "ImageUserInput",
         "ImageUrlContentItem": "InputImageContentItem",
         "ImageUrlFunctionCallOutputContentItem": "InputImageFunctionCallOutputContentItem",
+        "UrlUserInput1": "AudioUserInput",
+        "AudioUrlContentItem": "InputAudioContentItem",
     }
     for generated_name, stable_name in stable_names.items():
         if source.count(f"class {generated_name}(") != 1:

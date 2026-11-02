@@ -181,6 +181,7 @@ pub(crate) struct MessageProcessor {
 
 #[derive(Debug)]
 pub(crate) struct ConnectionSessionState {
+    disconnect: CancellationToken,
     pub(crate) rpc_gate: Arc<ConnectionRpcGate>,
     pub(crate) origin: crate::transport::ConnectionOrigin,
     pub(crate) mcp_event_streams: McpEventStreams,
@@ -201,6 +202,7 @@ impl ConnectionSessionState {
     pub(crate) fn new(origin: crate::transport::ConnectionOrigin) -> Self {
         Self {
             origin,
+            disconnect: CancellationToken::new(),
             rpc_gate: Arc::new(ConnectionRpcGate::new()),
             mcp_event_streams: McpEventStreams::default(),
             initialized: OnceLock::new(),
@@ -866,8 +868,16 @@ impl MessageProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        let Ok(thread) = self
+            .thread_processor
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+        else {
+            return;
+        };
         self.thread_processor
-            .try_attach_thread_listener(thread_id, connection_ids)
+            .try_attach_thread_listener(thread_id, thread, connection_ids)
             .await;
     }
 
@@ -896,6 +906,7 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
+        session_state.disconnect.cancel();
         session_state.rpc_gate.close().await;
         self.account_processor
             .gateway_connection_closed(connection_id);
@@ -1024,6 +1035,7 @@ impl MessageProcessor {
             | ClientRequest::ThreadDelete { .. }
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
             ClientRequest::ThreadSample { .. }
+            | ClientRequest::ThreadGuardianReview { .. }
             | ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
             | ClientRequest::ReviewStart { .. }
@@ -1458,7 +1470,9 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadSectionMove { params, .. } => {
-                self.thread_processor.thread_section_move(params).await
+                self.thread_processor
+                    .thread_section_move(request_id.clone(), params)
+                    .await
             }
             ClientRequest::ThreadSectionList { params, .. } => {
                 self.thread_processor.thread_section_list(params).await
@@ -1696,6 +1710,20 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::ThreadGuardianReview { params, .. } => {
+                let cancellation = &request_context.cancellation;
+                let review =
+                    self.turn_processor
+                        .thread_guardian_review(&request_id, params, cancellation);
+                tokio::pin!(review);
+                tokio::select! {
+                    result = &mut review => result,
+                    _ = session.disconnect.cancelled() => {
+                        cancellation.cancel();
+                        review.await
+                    }
+                }
+            }
             ClientRequest::ThreadInjectItems { params, .. } => {
                 self.turn_processor
                     .thread_inject_items(&request_id, params)
@@ -1715,8 +1743,9 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadRealtimeStart { params, .. } => {
+                let sideband_base_url = None;
                 self.turn_processor
-                    .thread_realtime_start(&request_id, params)
+                    .thread_realtime_start(&request_id, params, sideband_base_url)
                     .await
             }
             ClientRequest::ThreadRealtimeAppendAudio { params, .. } => {
@@ -1746,7 +1775,8 @@ impl MessageProcessor {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {
-                self.turn_processor.review_start(&request_id, params).await
+                // Keep review setup from inflating the shared request dispatcher's stack frame.
+                Box::pin(self.turn_processor.review_start(&request_id, params)).await
             }
             ClientRequest::McpServerOauthLogin { params, .. } => {
                 // Keep MCP discovery's large future from inflating every request.

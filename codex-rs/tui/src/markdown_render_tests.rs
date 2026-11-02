@@ -510,7 +510,7 @@ fn blockquote_with_code_block() {
                 .collect::<String>()
         })
         .collect();
-    assert_eq!(lines, vec!["code".to_string()]);
+    assert_eq!(lines, vec!["> code".to_string()]);
 }
 
 #[test]
@@ -527,7 +527,7 @@ fn blockquote_with_multiline_code_block() {
                 .collect::<String>()
         })
         .collect();
-    assert_eq!(lines, vec!["first", "second"]);
+    assert_eq!(lines, vec!["> first", "> second"]);
 }
 
 #[test]
@@ -567,8 +567,8 @@ fn nested_blockquote_with_inline_and_fenced_code() {
             "> ".to_string(),
             "> > Inner quote and inline code".to_string(),
             "> > ".to_string(),
-            "# fenced code inside a quote".to_string(),
-            "echo \"hello from a quote\"".to_string(),
+            "> > # fenced code inside a quote".to_string(),
+            "> > echo \"hello from a quote\"".to_string(),
         ]
     );
 }
@@ -1467,7 +1467,10 @@ fn code_block_no_lang_plain() {
 fn code_block_multiple_lines_root() {
     let md = "```\nfirst\nsecond\n```\n";
     let text = render_markdown_text(md);
-    let expected = Text::from_iter([Line::from("first"), Line::from("second")]);
+    let expected = Text::from_iter([
+        Line::from_iter(["", "first"]),
+        Line::from_iter(["", "second"]),
+    ]);
     assert_eq!(text, expected);
 }
 
@@ -1547,7 +1550,7 @@ Here is a code block that shows another fenced block:
 }
 
 #[test]
-fn fenced_code_block_inside_unordered_list_item_is_flush_left() {
+fn code_block_inside_unordered_list_item_is_indented() {
     let md = "- Item\n\n  ```\n  code line\n  ```\n";
     let text = render_markdown_text(md);
     let lines: Vec<String> = text
@@ -1560,7 +1563,7 @@ fn fenced_code_block_inside_unordered_list_item_is_flush_left() {
                 .collect::<String>()
         })
         .collect();
-    assert_eq!(lines, vec!["• Item", "", "code line"]);
+    assert_eq!(lines, vec!["• Item", "", "  code line"]);
 }
 
 #[test]
@@ -1577,24 +1580,7 @@ fn code_block_multiple_lines_inside_unordered_list() {
                 .collect::<String>()
         })
         .collect();
-    assert_eq!(lines, vec!["• Item", "", "first", "second"]);
-}
-
-#[test]
-fn code_block_inside_unordered_list_item_multiple_lines() {
-    let md = "- Item\n\n  ```\n  first\n  second\n  ```\n";
-    let text = render_markdown_text(md);
-    let lines: Vec<String> = text
-        .lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.clone())
-                .collect::<String>()
-        })
-        .collect();
-    assert_eq!(lines, vec!["• Item", "", "first", "second"]);
+    assert_eq!(lines, vec!["• Item", "", "  first", "  second"]);
 }
 
 #[test]
@@ -1604,7 +1590,7 @@ fn list_item_after_code_block_keeps_blank_separator() {
     let lines = plain_lines(&text);
     assert_eq!(
         lines,
-        vec!["1. First:", "", "fn first() {}", "", "2. Second:"]
+        vec!["1. First:", "", "   fn first() {}", "", "2. Second:"]
     );
     assert_snapshot!(
         "list_item_after_code_block_keeps_blank_separator",
@@ -1624,7 +1610,7 @@ fn outer_list_item_after_nested_code_block_keeps_blank_separator() {
             "1. First:",
             "    • Nested:",
             "",
-            "fn first() {}",
+            "      fn first() {}",
             "",
             "2. Second:",
         ]
@@ -1772,7 +1758,7 @@ fn ordered_item_with_code_block_and_nested_bullet() {
             "1. item 1".to_string(),
             "2. item 2".to_string(),
             String::new(),
-            "code".to_string(),
+            "   code".to_string(),
             "    • PROCESS_START (a OnceLock<Instant>) keeps the start time for the entire process.".to_string(),
         ]
     );

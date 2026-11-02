@@ -6,7 +6,6 @@ use super::*;
 use crate::async_question_reply::AsyncQuestionReply;
 use crate::style::accent_color_on;
 use crate::style::history_prompt_style;
-use crate::terminal_hyperlinks::LinePrefixPolicy;
 use crate::terminal_hyperlinks::annotate_web_urls;
 use crate::terminal_hyperlinks::lines_with_sources_eq;
 use crate::terminal_hyperlinks::remap_source_wrapped_line;
@@ -522,10 +521,6 @@ impl HistoryCell for AgentMessageCell {
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let mut wrapped = Vec::new();
         for (index, line) in self.lines.iter().enumerate() {
-            if line.prefix_policy == LinePrefixPolicy::Omit {
-                wrapped.push(line.clone());
-                continue;
-            }
             let initial_indent = if index == 0 && self.is_first_line {
                 "• ".dim().into()
             } else {

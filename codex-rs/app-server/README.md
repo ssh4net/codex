@@ -1,3 +1,20 @@
+# Managed human command checkpoints (experimental)
+
+A matching managed `requirements.toml` prefix rule with `decision = "prompt-user"`
+requires a fresh human decision, including when the thread uses automatic review.
+Prefix matching, exact-path precedence, and executable mappings stay unchanged. Clients
+supporting this workflow must initialize with `experimentalApi: true` and
+`requiredHumanApproval: true`.
+
+The server sends `item/commandExecution/requestApproval` with `kind: "humanCommand"`,
+a unique `approvalId`, and the command to display. Only `accept`, `decline`, and
+`cancel` are valid responses. Session and persistent approvals cannot satisfy the
+checkpoint. Only capable clients receive or answer these requests. Pending prompts
+use the normal approval replay flow when a capable client reconnects. With no capable
+connection when approval is requested, the command is rejected. The prompt itself
+does not start an execution item; normal command execution events report execution
+after approval.
+
 # Thread memory summary (experimental)
 
 `thread/memory/read` takes `{threadId}` for a loaded thread and returns
@@ -26,6 +43,13 @@ Listing also returns `-32603` if the store repeats a cursor while filling a page
 These errors are not evidence that history is exhausted; callers can retry.
 A successful response with `nextCursor: null` still indicates exhaustion.
 Default scan-and-repair requests retain their filesystem fallback.
+
+# Thread section moves
+
+After a successful `thread/section/move`, the app-server broadcasts
+`thread/section/changed` to its connected clients. The notification carries
+`threadId` and the destination `sectionId`, which is null for a removal.
+Moves within a section also emit this event so clients can refresh its order.
 
 # Shutdown admission errors
 
@@ -179,6 +203,14 @@ discovery finds no project-root marker, Git checkout, or project-local `.codex`
 directory. Starting a task there does not preapprove project configuration added
 later. Existing trust decisions and permission checks for projects are unchanged.
 
+# Review delivery
+
+`review/start` runs the review on the supplied thread and returns that same
+`reviewThreadId`. Clients can omit `delivery`, send `null`, or specify `"inline"`.
+Clients that used `"detached"` should call `thread/start` and pass the new thread id
+to `review/start`. To keep the original conversation history with custom review
+instructions, use `thread/fork` followed by `turn/start`.
+
 # Thread removal
 
 `thread/archive` and `thread/delete` reject attempts to remove a live internal
@@ -287,7 +319,7 @@ any files were compressed; failures are reported through existing logs and metri
 There are no progress notifications or cancellation API. Clients sharing this
 Codex home must support compressed rollout files, including shared histories.
 
-## Managed model provider requirements
+## Model provider admission
 
 `configRequirements/read` reports `supportsIndependentSpeedModes: true` when
 `features.fast_mode` and `features.ultrafast_mode` independently control Fast and
@@ -299,24 +331,48 @@ Existing threads retain their provider configuration. Input RPCs reject requests
 `model_provider` or `model_providers` requirements no longer match that configuration, or cannot
 be loaded. This covers turn start/steer, review, compaction, manual queue start, and active goal
 updates. Realtime connections use separate routing configuration and are not checked here.
-Interrupt, realtime stop, and goal pause/clear remain available. User and project
-configuration changes alone do not invalidate existing threads.
+Interrupt, realtime stop, and goal pause/clear remain available.
+
+Resume and input RPCs also reject a thread whose saved provider differs from the current
+configured provider, including profile and app-server launch overrides. The JSON-RPC error's
+`data` contains `ModelProviderError`: `modelProviderMismatch` has `modelProvider` and
+`currentModelProvider`, `modelProviderNotConfigured` identifies a missing provider, and
+`modelProviderPolicyConflict` identifies a mandatory-policy conflict. Clients can still use
+`thread/read` to display history and disable the composer with the error's explanation.
+Changing the resume request's provider does not bypass validation of the saved provider;
+switch the configured provider back to continue the chat. Input is also rejected when the
+current provider configuration cannot be loaded. Older clients retain their normal error
+fallback for unrecognized structured error variants.
 
 ## Managed network requirements
 
-Use `[network_proxy]` in `requirements.toml` for shared managed network constraints.
-`[experimental_network]` remains a compatibility alias. A single requirements layer cannot
-contain both names; across layers, they merge with normal precedence. The
-`configRequirements/read.network` response exposes the resulting constraints.
+In `requirements.toml`, put shared network constraints directly in `[permissions.network]`,
+alongside `[permissions.filesystem]`:
+
+```toml
+[permissions.network]
+enabled = true
+```
+
+`[network_proxy]` and its compatibility alias `[experimental_network]` still work.
+Do not mix either with `[permissions.network]`, even across requirements layers. A single
+layer cannot use both top-level names; across layers the top-level names merge with normal
+precedence. `configRequirements/read` returns the result in `requirements.network`.
 
 In `config.toml`, `[features.network_proxy]` configures the proxy, while
 `[permissions.<profile>.network]` configures a profile's network settings. Managed requirements
 remain separate and override conflicting profile settings. They can start the proxy without
 enabling the feature; feature settings apply only when the feature is enabled.
 
+In `requirements.toml`, `network` is reserved, like `filesystem`. Rename any managed profile
+named `network` and update its references before upgrading. An empty `[permissions.network]`
+is rejected because it is indistinguishable from an old empty profile. Omit the table when
+there are no shared network settings. A profile named `network` is still allowed in `config.toml`.
+
 Policy publishers must continue using `[experimental_network]` until every client and policy
-validation layer supports `[network_proxy]`. Older clients or intermediaries may ignore or strip
-the new spelling, or skip host-local validation. This reader change does not migrate or
+validation layer supports the chosen new spelling. Older clients or intermediaries may ignore or
+strip constraints in `[network_proxy]` or `[permissions.network]`; intermediaries may also skip
+host-local validation. This reader change does not migrate or
 version-gate published policy bundles.
 
 # Amazon Bedrock authentication
@@ -711,3 +767,11 @@ managed fields. Configuration writes that overlap managed settings are rejected.
 
 Exporter header values are redacted in effective config, source layers, managed
 requirements, and write-override metadata. Runtime exporters retain the original values.
+
+Managed span attributes and tracestate metadata are included in effective config
+and requirements reads. Unmanaged metadata remains writable.
+
+Tracestate requirements merge individual fields within each member. For example,
+requiring `otel.tracestate.vendor.tenant` preserves an ordinary `vendor.region`.
+Only required fields and edits to their ancestors are protected; sibling fields
+retain their origins and remain writable.

@@ -41,6 +41,7 @@ use crate::mcp::RequestId;
 use crate::memory_citation::MemoryCitation;
 use crate::models::ActivePermissionProfile;
 use crate::models::AgentMessageInputContent;
+use crate::models::AudioReference;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
 use crate::models::ImageDetail;
@@ -1644,6 +1645,14 @@ pub enum EventMsg {
 
     ExecApprovalRequest(ExecApprovalRequestEvent),
 
+    /// Ends an in-process network prompt, including when its proxy request is dropped.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    NetworkApprovalResolved {
+        approval_id: String,
+    },
+
     RequestPermissions(RequestPermissionsEvent),
 
     RequestUserInput(RequestUserInputEvent),
@@ -1748,7 +1757,9 @@ impl EventMsg {
     pub fn command_approval_start(&self) -> Option<(&str, i64)> {
         match self {
             Self::ExecApprovalRequest(request)
-                if request.approval_id.is_none() && request.network_approval_context.is_none() =>
+                if request.kind == crate::approvals::ExecApprovalKind::Command
+                    && request.approval_id.is_none()
+                    && request.network_approval_context.is_none() =>
             {
                 Some((&request.call_id, request.started_at_ms))
             }
@@ -2506,6 +2517,10 @@ pub struct TokenUsageRecord {
 pub struct TokenUsageInfo {
     pub total_token_usage: TokenUsage,
     pub last_token_usage: TokenUsage,
+    /// Whether the last context count includes reasoning retained from earlier turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_usage_includes_reasoning: Option<bool>,
     // TODO(aibrahim): make this not optional
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
@@ -2514,33 +2529,26 @@ pub struct TokenUsageInfo {
 impl TokenUsageInfo {
     pub fn new_or_append(
         info: &Option<TokenUsageInfo>,
-        last: &Option<TokenUsage>,
+        last: &TokenUsage,
+        includes_reasoning: bool,
         model_context_window: Option<i64>,
-    ) -> Option<Self> {
-        if info.is_none() && last.is_none() {
-            return None;
-        }
-
+    ) -> Self {
         let mut info = match info {
             Some(info) => info.clone(),
             None => Self {
                 total_token_usage: TokenUsage::default(),
+                last_usage_includes_reasoning: None,
                 last_token_usage: TokenUsage::default(),
                 model_context_window,
             },
         };
-        if let Some(last) = last {
-            info.append_last_usage(last);
-        }
+        info.total_token_usage.add_assign(last);
+        info.last_token_usage = last.clone();
+        info.last_usage_includes_reasoning = Some(includes_reasoning);
         if let Some(model_context_window) = model_context_window {
             info.model_context_window = Some(model_context_window);
         }
-        Some(info)
-    }
-
-    pub fn append_last_usage(&mut self, last: &TokenUsage) {
-        self.total_token_usage.add_assign(last);
-        self.last_token_usage = last.clone();
+        info
     }
 
     pub fn fill_to_context_window(&mut self, context_window: i64) {
@@ -2552,6 +2560,7 @@ impl TokenUsageInfo {
             total_tokens: context_window,
             ..TokenUsage::default()
         };
+        self.last_usage_includes_reasoning = None;
         self.last_token_usage = TokenUsage {
             total_tokens: delta,
             ..TokenUsage::default()
@@ -2561,6 +2570,7 @@ impl TokenUsageInfo {
     pub fn full_context_window(context_window: i64) -> Self {
         let mut info = Self {
             total_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(context_window),
         };
@@ -2768,6 +2778,14 @@ pub enum UserMessageImageKind {
     File,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum UserMessageAudioKind {
+    Inline,
+    File,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct UserMessageEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2809,6 +2827,16 @@ pub struct UserMessageEvent {
     /// legacy UI history events and correspond to audio sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<Vec<String>>,
+    /// File-backed audio references. When `audio_order` is complete, consumers
+    /// combine this with `audio` without duplicating inline payloads. Older
+    /// producers may instead store the complete ordered reference list here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_references: Option<Vec<AudioReference>>,
+    /// Inline and file-backed audio kinds in their original input order.
+    /// New mixed-input producers populate this alongside the split `audio` and
+    /// `audio_references` fields; when absent, consumers retain the prior shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_order: Vec<UserMessageAudioKind>,
     /// Local file paths sourced from `UserInput::LocalAudio`. These are kept so
     /// clients can reattach audio when editing history and should not be
     /// treated as API-ready URLs.
@@ -2838,6 +2866,30 @@ impl UserMessageEvent {
         inline_count == self.images.as_ref().map_or(0, Vec::len)
             && file_count == self.file_ids.as_ref().map_or(0, Vec::len)
     }
+
+    /// Returns whether `audio_order` accounts for every split audio reference exactly once.
+    pub fn has_complete_audio_order(&self) -> bool {
+        if self.audio_order.is_empty() {
+            return false;
+        }
+
+        let mut inline_count = 0;
+        let mut file_count = 0;
+        for audio_kind in &self.audio_order {
+            match audio_kind {
+                UserMessageAudioKind::Inline => inline_count += 1,
+                UserMessageAudioKind::File => file_count += 1,
+            }
+        }
+
+        inline_count == self.audio.as_ref().map_or(0, Vec::len)
+            && file_count == self.audio_references.as_ref().map_or(0, Vec::len)
+            && self.audio_references.as_ref().is_none_or(|references| {
+                references
+                    .iter()
+                    .all(|reference| matches!(reference, AudioReference::File { .. }))
+            })
+    }
 }
 
 /// Returns the user-facing preview text for a user message.
@@ -2858,7 +2910,13 @@ pub fn user_message_preview(user: &UserMessageEvent) -> Option<String> {
     {
         return Some("[Image]".to_string());
     }
-    if user.audio.as_ref().is_some_and(|audio| !audio.is_empty()) || !user.local_audio.is_empty() {
+    if user.audio.as_ref().is_some_and(|audio| !audio.is_empty())
+        || user
+            .audio_references
+            .as_ref()
+            .is_some_and(|audio| !audio.is_empty())
+        || !user.local_audio.is_empty()
+    {
         return Some("[Audio]".to_string());
     }
     None
@@ -3680,13 +3738,6 @@ pub struct GitInfo {
     )]
     #[schemars(with = "Option<String>")]
     pub repository_url: Option<SanitizedGitUrl>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewDelivery {
-    Inline,
-    Detached,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
@@ -4760,6 +4811,7 @@ mod tests {
     use crate::items::UserMessageItem;
     use crate::items::WebSearchItem;
     use crate::mcp::CallToolResult;
+    use crate::models::AudioReference;
     use crate::permissions::FileSystemAccessMode;
     use crate::permissions::FileSystemPath;
     use crate::permissions::FileSystemSandboxEntry;
@@ -6295,7 +6347,14 @@ mod tests {
                 detail: Some(ImageDetail::Original),
             },
             crate::user_input::UserInput::Audio {
-                audio_url: "https://example.com/remote.mp3".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "https://example.com/remote.mp3".to_string(),
+                },
+            },
+            crate::user_input::UserInput::Audio {
+                audio: AudioReference::File {
+                    file_id: "file_audio".to_string(),
+                },
             },
             crate::user_input::UserInput::LocalAudio {
                 path: local_audio_path.clone(),
@@ -6340,16 +6399,41 @@ mod tests {
             Some(vec!["https://example.com/remote.mp3".to_string()])
         );
         assert_eq!(event.local_audio, vec![local_audio_path]);
+        assert_eq!(
+            event.audio_references,
+            Some(vec![AudioReference::File {
+                file_id: "file_audio".to_string(),
+            }])
+        );
+        assert_eq!(
+            event.audio_order,
+            vec![UserMessageAudioKind::Inline, UserMessageAudioKind::File]
+        );
+        // Earlier readers ignore the new ordered field and retain inline recordings.
+        #[derive(Deserialize)]
+        struct EarlierUserMessageEvent {
+            audio: Option<Vec<String>>,
+        }
+        let earlier: EarlierUserMessageEvent = serde_json::from_value(event_json).unwrap();
+        assert_eq!(earlier.audio, event.audio);
     }
 
     #[test]
     fn audio_only_user_message_has_placeholder_preview() {
-        let event = UserMessageEvent {
-            audio: Some(vec!["https://example.com/remote.mp3".to_string()]),
-            ..Default::default()
-        };
-
-        assert_eq!(user_message_preview(&event), Some("[Audio]".to_string()));
+        for event in [
+            UserMessageEvent {
+                audio: Some(vec!["https://example.com/remote.mp3".to_string()]),
+                ..Default::default()
+            },
+            UserMessageEvent {
+                audio_references: Some(vec![AudioReference::File {
+                    file_id: "file_audio".into(),
+                }]),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(user_message_preview(&event), Some("[Audio]".to_string()));
+        }
     }
 
     #[test]
@@ -6634,10 +6718,11 @@ mod tests {
     fn token_usage_info_new_or_append_updates_context_window_when_provided() {
         let initial = Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
         });
-        let last = Some(TokenUsage {
+        let last = TokenUsage {
             input_tokens: 10,
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
@@ -6645,10 +6730,14 @@ mod tests {
             reasoning_output_tokens: 0,
             total_tokens: 10,
             codex_rollout_budget_units: None,
-        });
+        };
 
-        let info = TokenUsageInfo::new_or_append(&initial, &last, Some(128_000))
-            .expect("new_or_append should return info");
+        let info = TokenUsageInfo::new_or_append(
+            &initial,
+            &last,
+            /*includes_reasoning*/ true,
+            Some(128_000),
+        );
 
         assert_eq!(info.model_context_window, Some(128_000));
     }
@@ -6657,10 +6746,11 @@ mod tests {
     fn token_usage_info_new_or_append_preserves_context_window_when_not_provided() {
         let initial = Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
         });
-        let last = Some(TokenUsage {
+        let last = TokenUsage {
             input_tokens: 10,
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
@@ -6668,11 +6758,11 @@ mod tests {
             reasoning_output_tokens: 0,
             total_tokens: 10,
             codex_rollout_budget_units: None,
-        });
+        };
 
-        let info =
-            TokenUsageInfo::new_or_append(&initial, &last, /*model_context_window*/ None)
-                .expect("new_or_append should return info");
+        let info = TokenUsageInfo::new_or_append(
+            &initial, &last, /*includes_reasoning*/ true, /*model_context_window*/ None,
+        );
 
         assert_eq!(info.model_context_window, Some(258_400));
     }

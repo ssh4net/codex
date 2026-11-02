@@ -95,7 +95,6 @@ impl ToolOutputPreview {
             line: bounded,
             hyperlinks,
             source,
-            prefix_policy: crate::terminal_hyperlinks::LinePrefixPolicy::Apply,
         };
         let wrapped = word_wrap_line_with_source(
             &bounded.line,

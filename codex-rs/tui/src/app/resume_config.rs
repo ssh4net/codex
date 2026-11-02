@@ -144,7 +144,8 @@ impl App {
                 | Ok(crate::session_resume::ResolveCwdOutcome::ContinueAfterPrompt(cwd)) => cwd,
                 Ok(crate::session_resume::ResolveCwdOutcome::Continue(None)) => current_cwd.clone(),
                 Ok(crate::session_resume::ResolveCwdOutcome::Exit) => {
-                    return Err(AppRunControl::Exit(ExitReason::UserRequested));
+                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+                    return Err(AppRunControl::Continue);
                 }
             }
         };
@@ -277,9 +278,6 @@ impl App {
         if result.should_exit {
             if options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask) {
                 return Err(AppRunControl::Continue);
-            }
-            if !target.supports_command_center() {
-                return Err(AppRunControl::Exit(ExitReason::UserRequested));
             }
             if self
                 .chat_widget

@@ -957,31 +957,18 @@ mod tests {
         for d in deltas {
             ctrl.push(d);
             while let (Some(cell), idle) = ctrl.on_commit_tick() {
-                lines.extend(cell.transcript_hyperlink_lines(u16::MAX));
+                lines.extend(cell.transcript_lines(u16::MAX));
                 if idle {
                     break;
                 }
             }
         }
         if let (Some(cell), _source) = ctrl.finalize() {
-            lines.extend(cell.transcript_hyperlink_lines(u16::MAX));
+            lines.extend(cell.transcript_lines(u16::MAX));
         }
-        lines
+        lines_to_plain_strings(&lines)
             .into_iter()
-            .map(|line| {
-                let text = line
-                    .line
-                    .spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
-                    .collect::<Vec<_>>()
-                    .join("");
-                if line.prefix_policy == crate::terminal_hyperlinks::LinePrefixPolicy::Omit {
-                    text
-                } else {
-                    text.chars().skip(2).collect()
-                }
-            })
+            .map(|s| s.chars().skip(2).collect::<String>())
             .collect()
     }
 
@@ -1932,28 +1919,6 @@ mod tests {
                 .iter()
                 .any(|line| line.contains('━') || line.contains('─')),
             "did not expect a table separator for non-markdown fence: {streamed:?}"
-        );
-    }
-
-    #[test]
-    fn streamed_fenced_code_omits_outer_gutter_and_preserves_code_indent() {
-        let deltas = vec![
-            "Run this script:\n\n```python\n",
-            "if ready:\n",
-            "    print(\"ready\")\n",
-            "```\n\nThen continue.\n",
-        ];
-
-        assert_eq!(
-            collect_streamed_lines(&deltas, Some(80)),
-            vec![
-                "Run this script:".to_string(),
-                String::new(),
-                "if ready:".to_string(),
-                "    print(\"ready\")".to_string(),
-                String::new(),
-                "Then continue.".to_string(),
-            ]
         );
     }
 

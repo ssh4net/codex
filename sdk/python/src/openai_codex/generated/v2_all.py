@@ -1101,8 +1101,16 @@ class InputAudioContentItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    audio_url: str
     type: Annotated[Literal["input_audio"], Field(title="InputAudioContentItemType")]
+    audio_url: str
+
+
+class FileIdContentItem1(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["input_audio"], Field(title="InputAudioContentItemType")]
+    file_id: str
 
 
 class OutputTextContentItem(BaseModel):
@@ -2126,6 +2134,13 @@ class InitializeCapabilities(BaseModel):
             description="Opt into `attestation/generate` requests for upstream `x-oai-attestation`.",
         ),
     ] = False
+    required_human_approval: Annotated[
+        bool | None,
+        Field(
+            alias="requiredHumanApproval",
+            description="Present `humanCommand` approvals to a person and return only a one-time decision. Requires `experimentalApi`. Pending requests can be replayed to compatible clients.",
+        ),
+    ] = None
 
 
 class InitializeParams(BaseModel):
@@ -2784,6 +2799,59 @@ class ModelProviderCapabilitiesReadResponse(BaseModel):
     )
     image_generation: Annotated[bool, Field(alias="imageGeneration")]
     web_search: Annotated[bool, Field(alias="webSearch")]
+
+
+class ModelProviderMismatchModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    current_model_provider: Annotated[str, Field(alias="currentModelProvider")]
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    type: Annotated[
+        Literal["modelProviderMismatch"],
+        Field(title="ModelProviderMismatchv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderNotConfiguredModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    type: Annotated[
+        Literal["modelProviderNotConfigured"],
+        Field(title="ModelProviderNotConfiguredv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderPolicyConflictModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    required_model_provider: Annotated[str, Field(alias="requiredModelProvider")]
+    type: Annotated[
+        Literal["modelProviderPolicyConflict"],
+        Field(title="ModelProviderPolicyConflictv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderError(
+    RootModel[
+        ModelProviderMismatchModelProviderError
+        | ModelProviderNotConfiguredModelProviderError
+        | ModelProviderPolicyConflictModelProviderError
+    ]
+):
+    root: Annotated[
+        ModelProviderMismatchModelProviderError
+        | ModelProviderNotConfiguredModelProviderError
+        | ModelProviderPolicyConflictModelProviderError,
+        Field(
+            description="Structured JSON-RPC error data. Unknown errors must retain the client's normal fallback.",
+            title="ModelProviderError",
+        ),
+    ]
 
 
 class ModelRerouteReason(RootModel[Literal["highRiskCyberActivity"]]):
@@ -4135,7 +4203,6 @@ class ResponsesApiWebSearchAction(
 
 class ReviewDelivery(Enum):
     inline = "inline"
-    detached = "detached"
 
 
 class UncommittedChangesReviewTarget(BaseModel):
@@ -6249,6 +6316,20 @@ class ThreadSectionAppearance(BaseModel):
     icon: str | None = None
 
 
+class ThreadSectionChangedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    section_id: Annotated[
+        str | None,
+        Field(
+            alias="sectionId",
+            description="Destination section, or `null` when the thread was removed from its section.",
+        ),
+    ]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class ThreadSectionCreateParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6689,6 +6770,14 @@ class AudioUserInput(BaseModel):
     url: str
 
 
+class FileIdUserInput1(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["audio"], Field(title="AudioUserInputType")]
+    file_id: Annotated[str, Field(alias="fileId")]
+
+
 class LocalAudioUserInput(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6722,6 +6811,7 @@ class UserInput(
         | FileIdUserInput
         | LocalImageUserInput
         | AudioUserInput
+        | FileIdUserInput1
         | LocalAudioUserInput
         | SkillUserInput
         | MentionUserInput
@@ -6733,6 +6823,7 @@ class UserInput(
         | FileIdUserInput
         | LocalImageUserInput
         | AudioUserInput
+        | FileIdUserInput1
         | LocalAudioUserInput
         | SkillUserInput
         | MentionUserInput
@@ -8302,6 +8393,7 @@ class ContentItem(
         | InputImageContentItem
         | FileIdContentItem
         | InputAudioContentItem
+        | FileIdContentItem1
         | OutputTextContentItem
     ]
 ):
@@ -8310,6 +8402,7 @@ class ContentItem(
         | InputImageContentItem
         | FileIdContentItem
         | InputAudioContentItem
+        | FileIdContentItem1
         | OutputTextContentItem
     )
 
@@ -9205,10 +9298,13 @@ class OtelRequirements(BaseModel):
     exporter: OtelExporter | None = None
     log_agent_responses: bool | None = None
     log_guardian_assessments: bool | None = None
+    log_sse_deltas: bool | None = None
     log_user_prompt: bool | None = None
     metrics_exporter: OtelExporter | None = None
+    span_attributes: dict[str, Any] | None = None
     tool_result: OtelToolResultLogConfig | None = None
     trace_exporter: OtelExporter | None = None
+    tracestate: dict[str, Any] | None = None
 
 
 class OverriddenMetadata(BaseModel):
@@ -9458,7 +9554,7 @@ class ReviewStartParams(BaseModel):
     delivery: Annotated[
         ReviewDelivery | None,
         Field(
-            description="Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
+            description="Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
         ),
     ] = None
     target: ReviewTarget
@@ -9633,6 +9729,23 @@ class ThreadNameUpdatedServerNotification(BaseModel):
         Literal["thread/name/updated"], Field(title="Thread/name/updatedNotificationMethod")
     ]
     params: ThreadNameUpdatedNotification
+
+
+class ThreadSectionChangedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["thread/section/changed"], Field(title="Thread/section/changedNotificationMethod")
+    ]
+    params: ThreadSectionChangedNotification
 
 
 class ThreadAttachmentUpdatedServerNotification(BaseModel):
@@ -12563,11 +12676,7 @@ class ReviewStartResponse(BaseModel):
         populate_by_name=True,
     )
     review_thread_id: Annotated[
-        str,
-        Field(
-            alias="reviewThreadId",
-            description="Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread.",
-        ),
+        str, Field(alias="reviewThreadId", description="The thread id supplied to `review/start`.")
     ]
     turn: Turn
 
@@ -13576,6 +13685,7 @@ class ServerNotification(
         | ThreadRevertedServerNotification
         | SkillsChangedServerNotification
         | ThreadNameUpdatedServerNotification
+        | ThreadSectionChangedServerNotification
         | ThreadAttachmentUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadPredictionUpdatedServerNotification
@@ -13664,6 +13774,7 @@ class ServerNotification(
         | ThreadRevertedServerNotification
         | SkillsChangedServerNotification
         | ThreadNameUpdatedServerNotification
+        | ThreadSectionChangedServerNotification
         | ThreadAttachmentUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadPredictionUpdatedServerNotification

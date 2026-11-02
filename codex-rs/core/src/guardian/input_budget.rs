@@ -6,8 +6,6 @@
 //! Loss telemetry describes accepted inputs, excluding feasibility checks and failed retries.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use codex_features::Feature;
@@ -33,15 +31,11 @@ use crate::session::turn::build_prompt;
 use crate::session::turn_context::TurnContext;
 
 #[derive(Clone)]
-pub(crate) struct PendingReviewContext(pub ComposedContext);
-
-/// Requests one bounded restart from the captured parent checkpoint when
-/// reviewer compaction invalidates the pending input. The flag belongs to this attempt.
-pub(super) struct CheckpointRecovery {
-    pub(super) requested: Arc<AtomicBool>,
-    pub(super) history_version: u64,
-    pub(super) fresh_parent_checkpoint: bool,
+pub(crate) struct PendingReviewContext {
+    pub context: ComposedContext,
 }
+
+pub(super) use codex_guardian_reviewer::CheckpointRecovery;
 
 /// Restart a reused reviewer before paying for a summary we would discard.
 /// A fresh checkpoint stays intact while final input selection makes the review fit.
@@ -84,7 +78,7 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
         codex_protocol::protocol::TruncationPolicy::Bytes(base.text.len()).token_budget();
     let maximum = effective_input_token_limit(turn.model_info(), turn.config.model_context_window)
         .saturating_sub(super::request_budget::INPUT_TOKEN_MARGIN);
-    let mut context = pending.0.clone();
+    let mut context = pending.context.clone();
     let history = session
         .clone_history()
         .await
@@ -93,9 +87,7 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
             session.services.image_store.as_ref(),
         )
         .await;
-    context.retain_new_instructions(&history);
-    context
-        .retain_new_native_messages(&history)
+    codex_guardian_context::prepare_sync_delivery(&mut context, &history)
         .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
     if context.estimated_tokens().saturating_add(minimum_prefix) > maximum {
         context
@@ -139,7 +131,7 @@ pub(crate) async fn finalize(
             "Guardian expects one review input".to_owned(),
         ));
     };
-    let mut context = pending.0.clone();
+    let mut context = pending.context.clone();
     let model = &step.settings.model_info;
     let history = session.clone_history().await;
     let recovery = session
@@ -163,9 +155,7 @@ pub(crate) async fn finalize(
         .await;
     // Use the history that will actually reach the model. Recompute after every
     // compaction retry; evidence removed by compaction must be delivered again.
-    context.retain_new_instructions(&history);
-    context
-        .retain_new_native_messages(&history)
+    codex_guardian_context::prepare_sync_delivery(&mut context, &history)
         .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
     let prompt = build_prompt(
         history
@@ -373,7 +363,7 @@ pub(crate) async fn finalize(
         }
     }
     step.turn.extension_data.insert(RetainedReviewContext {
-        context: pending.0.retained_instructions(),
+        context: pending.context.retained_instructions(),
         history_version,
     });
     session

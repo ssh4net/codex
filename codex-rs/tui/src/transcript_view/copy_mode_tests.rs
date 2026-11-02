@@ -80,7 +80,7 @@ fn navigate_copy_resize_and_exit() {
 
       > assistant quote
 
-    assistant code
+      assistant code
     ");
     insta::assert_snapshot!(
         view.footer_with_navigation(/*width*/ 50, crate::motion::MotionMode::Reduced, "")
@@ -142,8 +142,8 @@ fn copy_reveals_offscreen_block_with_context() {
     view.move_copy_target(&cells, KeyCode::Up);
     let after = render(&mut view, &cells, /*width*/ 50, /*height*/ 5);
     insta::assert_snapshot!(text(&after), @"
-      line
-      line
+    line
+    line
 
     last code
     ");

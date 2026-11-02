@@ -18,6 +18,7 @@ pub(crate) fn map_otel_requirements_to_api(otel: OtelRequirementsToml) -> OtelRe
         tool_result: otel.tool_result.map(|value| OtelToolResultLogConfig {
             max_bytes: value.max_bytes,
         }),
+        log_sse_deltas: otel.log_sse_deltas,
         log_user_prompt: otel.log_user_prompt,
         log_agent_responses: otel.log_agent_responses,
         log_guardian_assessments: otel.log_guardian_assessments,
@@ -25,6 +26,8 @@ pub(crate) fn map_otel_requirements_to_api(otel: OtelRequirementsToml) -> OtelRe
         exporter: otel.exporter.map(map_otel_exporter_to_api),
         trace_exporter: otel.trace_exporter.map(map_otel_exporter_to_api),
         metrics_exporter: otel.metrics_exporter.map(map_otel_exporter_to_api),
+        span_attributes: otel.span_attributes,
+        tracestate: otel.tracestate,
     }
 }
 

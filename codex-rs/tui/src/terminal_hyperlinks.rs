@@ -50,7 +50,7 @@ pub(crate) struct TerminalHyperlink {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DestinationKind {
     Web,
-    /// A generated visualization or a capability-validated spoken workspace artifact.
+    /// A generated visualization, validated workspace artifact, or locally viewed image.
     TrustedFile,
 }
 
@@ -113,6 +113,39 @@ impl TerminalHyperlink {
         self.destination_kind = DestinationKind::TrustedFile;
     }
 
+    /// A viewed image can live outside the workspace. Only link a local regular file whose
+    /// resolved extension opens as an image (a symlink named screenshot.png may target a script).
+    pub(crate) fn viewed_image(columns: Range<usize>, path: &Path) -> Option<Self> {
+        let url = Url::from_file_path(path).ok()?;
+        if url.host().is_some() || image::ImageFormat::from_path(path).is_err() {
+            return None;
+        }
+        // A Windows junction can lead to a UNC share. Check parents before following any of them.
+        #[cfg(windows)]
+        for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if ancestor.symlink_metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT
+                != 0
+            {
+                return None;
+            }
+        }
+        let target = path.canonicalize().ok()?;
+        let url = Url::from_file_path(&target).ok()?;
+        if url.host().is_some()
+            || image::ImageFormat::from_path(&target).is_err()
+            || !target.is_file()
+        {
+            return None;
+        }
+        Some(Self {
+            columns,
+            destination: url.into(),
+            destination_kind: DestinationKind::TrustedFile,
+        })
+    }
+
     pub(crate) fn trusted_workspace_file(
         columns: Range<usize>,
         file: TrustedWorkspaceFile,
@@ -140,40 +173,28 @@ impl TerminalHyperlink {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum LinePrefixPolicy {
-    #[default]
-    Apply,
-    Omit,
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct HyperlinkLine {
     pub(crate) line: Line<'static>,
     pub(crate) hyperlinks: Vec<TerminalHyperlink>,
     pub(crate) source: Option<LogicalLineSource>,
-    pub(crate) prefix_policy: LinePrefixPolicy,
 }
 
 // Source provenance is shared layout metadata; omit it from visual diagnostics to avoid
 // repeating an entire logical line for every wrapped fragment.
 impl std::fmt::Debug for HyperlinkLine {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = formatter.debug_struct("HyperlinkLine");
-        debug.field("line", &self.line);
-        debug.field("hyperlinks", &self.hyperlinks);
-        if self.prefix_policy == LinePrefixPolicy::Omit {
-            debug.field("prefix_policy", &self.prefix_policy);
-        }
-        debug.finish()
+        formatter
+            .debug_struct("HyperlinkLine")
+            .field("line", &self.line)
+            .field("hyperlinks", &self.hyperlinks)
+            .finish()
     }
 }
 
 impl PartialEq for HyperlinkLine {
     fn eq(&self, other: &Self) -> bool {
-        self.line == other.line
-            && self.hyperlinks == other.hyperlinks
-            && self.prefix_policy == other.prefix_policy
+        self.line == other.line && self.hyperlinks == other.hyperlinks
     }
 }
 
@@ -188,13 +209,19 @@ pub(crate) fn lines_with_sources_eq(left: &[HyperlinkLine], right: &[HyperlinkLi
             .eq(right.iter().map(|line| &line.source))
 }
 
+fn source_span_width(span: &Span<'_>) -> usize {
+    span.content
+        .graphemes(/*is_extended*/ true)
+        .map(display_width)
+        .sum()
+}
+
 impl HyperlinkLine {
     pub(crate) fn new(line: Line<'static>) -> Self {
         Self {
             line,
             hyperlinks: Vec::new(),
             source: None,
-            prefix_policy: LinePrefixPolicy::Apply,
         }
     }
 
@@ -202,10 +229,15 @@ impl HyperlinkLine {
         line_width(&self.line)
     }
 
+    /// The transcript expands tabs after wrapping. Keep their source columns until then.
+    pub(crate) fn source_width(&self) -> usize {
+        self.line.iter().map(source_span_width).sum()
+    }
+
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
         self.source = None;
-        let start = self.width();
-        let end = start + display_width(span.content.as_ref());
+        let start = self.source_width();
+        let end = start + source_span_width(&span);
         self.line.push_span(span);
         if end > start
             && let Some(destination) = destination.and_then(web_destination)
@@ -284,9 +316,6 @@ pub(crate) fn prefix_hyperlink_lines(
         .into_iter()
         .enumerate()
         .map(|(index, mut line)| {
-            if line.prefix_policy == LinePrefixPolicy::Omit {
-                return line;
-            }
             let prefix = if index == 0 {
                 initial_prefix.clone()
             } else {
@@ -458,7 +487,6 @@ pub(crate) fn remap_source_wrapped_line(
                 line,
                 hyperlinks,
                 source: Some(logical.wrapped(range, wrapped.prefix_bytes)),
-                prefix_policy: source.prefix_policy,
             }
         })
         .collect()
@@ -476,9 +504,6 @@ pub(crate) fn remap_wrapped_line(
     wrapped: Vec<Line<'static>>,
 ) -> Vec<HyperlinkLine> {
     let mut out = plain_hyperlink_lines(wrapped);
-    for line in &mut out {
-        line.prefix_policy = source.prefix_policy;
-    }
     if source.hyperlinks.is_empty() && source.source.is_none() {
         return out;
     }
@@ -1010,7 +1035,6 @@ mod tests {
                 /*columns*/ 0..usize::from(destination.cell_width()),
                 destination.to_string(),
             )],
-            prefix_policy: LinePrefixPolicy::Apply,
         };
 
         assert_eq!(
@@ -1077,7 +1101,6 @@ mod tests {
                         /*columns*/ 10..14,
                         "https://example.com/first".to_string(),
                     )],
-                    prefix_policy: LinePrefixPolicy::Apply,
                 },
                 HyperlinkLine {
                     source: None,
@@ -1086,7 +1109,6 @@ mod tests {
                         /*columns*/ 11..16,
                         "https://example.com/second".to_string(),
                     )],
-                    prefix_policy: LinePrefixPolicy::Apply,
                 },
             ]
         );
@@ -1346,7 +1368,6 @@ mod tests {
             source: None,
             line: Line::from("view"),
             hyperlinks: vec![link],
-            prefix_policy: LinePrefixPolicy::Apply,
         };
 
         assert_eq!(

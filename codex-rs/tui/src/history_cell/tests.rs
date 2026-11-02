@@ -827,22 +827,27 @@ async fn session_info_preserves_styled_tooltip_links() {
 }
 
 #[tokio::test]
-async fn session_info_first_event_suppresses_tooltips_and_nux() {
+async fn session_info_first_event_respects_tooltip_preference() {
     let config = test_config().await;
-    let cell = new_session_info(
-        &config,
-        &crate::local_settings::LocalSettings::from(&config),
-        "gpt-5",
-        "gpt-5",
-        &session_configured_event("gpt-5"),
-        /*is_first_event*/ true,
-        Some("Model just became available".to_string()),
-        Some(PlanType::Free),
-    );
+    let mut local_settings = crate::local_settings::LocalSettings::from(&config);
+    for show_tooltips in [true, false] {
+        local_settings.tui.show_tooltips = show_tooltips;
+        let cell = new_session_info(
+            &config,
+            &local_settings,
+            "requested-model",
+            "gpt-5",
+            &session_configured_event("gpt-5"),
+            /*is_first_event*/ true,
+            Some("Model just became available".to_string()),
+            Some(PlanType::Free),
+        );
 
-    let rendered = render_transcript(&cell).join("\n");
-    assert!(!rendered.contains("Model just became available"));
-    assert!(rendered.contains("To get started"));
+        let rendered = render_transcript(&cell).join("\n");
+        assert_eq!(rendered.contains("To get started"), show_tooltips);
+        assert!(!rendered.contains("Model just became available"));
+        assert!(!rendered.contains("model changed:"));
+    }
 }
 
 #[tokio::test]
@@ -2997,39 +3002,6 @@ fn agent_markdown_cell_renders_source_at_different_widths() {
         lines_32.len() > lines_80.len(),
         "narrower width should produce more wrapped lines: {lines_32:?}",
     );
-}
-
-#[test]
-fn agent_markdown_cell_renders_fenced_code_without_outer_gutter() {
-    let source =
-        "Run this script:\n\n```python\nif ready:\n    print(\"ready\")\n```\n\nThen continue.\n";
-    let cell = AgentMarkdownCell::new(source.to_string(), &test_cwd());
-
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
-
-    insta::assert_snapshot!(rendered, @r#"
-    • Run this script:
-
-    if ready:
-        print("ready")
-
-      Then continue.
-    "#);
-}
-
-#[test]
-fn agent_markdown_cell_nested_fenced_code_omits_structural_gutter() {
-    let source = "- Example:\n\n  ```python\n  if ready:\n      print(\"ready\")\n  ```\n";
-    let cell = AgentMarkdownCell::new(source.to_string(), &test_cwd());
-
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
-
-    insta::assert_snapshot!(rendered, @r#"
-    • • Example:
-
-    if ready:
-        print("ready")
-    "#);
 }
 
 #[test]

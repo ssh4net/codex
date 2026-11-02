@@ -12,6 +12,7 @@
 use codex_context_fragments::ContextualUserFragment;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -79,6 +80,8 @@ impl SectionDelivery {
 #[derive(Clone, PartialEq)]
 pub(crate) enum SectionContent {
     Transcript(TranscriptRecord),
+    /// Exact action payload; admission accounts for it without shortening its bytes.
+    Exact(ContentItem),
     Other(ContentItem),
 }
 
@@ -104,6 +107,31 @@ impl From<String> for SectionContent {
 }
 
 impl SectionContent {
+    pub(crate) fn evidence_bytes(&self) -> usize {
+        match self {
+            Self::Transcript(record) => record.rendered().text_bytes,
+            Self::Other(item) | Self::Exact(item) => match item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                    text.len()
+                }
+                ContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } => image_url.len(),
+                ContentItem::InputAudio {
+                    audio: AudioReference::Inline { audio_url },
+                } => audio_url.len(),
+                ContentItem::InputImage {
+                    image: ImageReference::File { .. },
+                    ..
+                }
+                | ContentItem::InputAudio {
+                    audio: AudioReference::File { .. },
+                } => 0,
+            },
+        }
+    }
+
     pub(crate) fn replace_text(&mut self, text: String) -> Option<String> {
         match self {
             Self::Transcript(record) => Some(record.replace_text(text)),
@@ -117,7 +145,7 @@ impl SectionContent {
     fn into_content_item(self) -> ContentItem {
         match self {
             Self::Transcript(record) => record.into_content_item(),
-            Self::Other(item) => item,
+            Self::Other(item) | Self::Exact(item) => item,
         }
     }
 }
@@ -137,6 +165,41 @@ pub struct ComposedContext {
 }
 
 impl CollectedContext {
+    /// Reports captured images without preparing or copying their payloads.
+    pub fn has_images(&self) -> bool {
+        let has_inline_image = |items: &[UserInput]| {
+            items.iter().any(|item| {
+                matches!(item, UserInput::Image { image, .. } if matches!(image, ImageReference::Inline { .. }))
+            })
+        };
+        self.sections.iter().any(|section| match section {
+            ContextSection::TranscriptImages(images) => !images.images.is_empty(),
+            ContextSection::NodeReplEvidence(evidence) => match &evidence.content {
+                crate::node_repl::NodeReplEvidenceContent::Collected {
+                    responses, mode, ..
+                } => {
+                    *mode == crate::NodeReplReviewEvidenceMode::Multimodal
+                        && responses
+                            .iter()
+                            .any(|response| has_inline_image(&response.items))
+                }
+                crate::node_repl::NodeReplEvidenceContent::Prepared(items) => {
+                    has_inline_image(items)
+                }
+            },
+            ContextSection::ConversationTranscript { .. }
+            | ContextSection::RootConversation { .. }
+            | ContextSection::TrustedUserAnswers { .. }
+            | ContextSection::RetainedUserInstructions { .. }
+            | ContextSection::SenderUserMessages { .. }
+            | ContextSection::PlannedAction(_)
+            | ContextSection::PreviousReviews(_)
+            | ContextSection::TrustedTool(_)
+            | ContextSection::TrustedSkills(_)
+            | ContextSection::PermissionContext { .. } => false,
+        })
+    }
+
     /// All collected entries, before the host applies retention or a delta cursor.
     pub fn transcript_entries(&self) -> &[ConversationTranscriptEntry] {
         self.sections
@@ -446,9 +509,9 @@ impl CollectedContext {
                         continue;
                     }
                     let mut items = planned
-                        .render(action)
+                        .render_content(action)
                         .into_iter()
-                        .map(|text| Budgeted::required(ContentItem::InputText { text }))
+                        .map(Budgeted::required)
                         .collect::<Vec<_>>();
                     if let Some(descriptions) = planned.tool_descriptions {
                         if descriptions.text.is_empty() {
@@ -458,11 +521,11 @@ impl CollectedContext {
                         }
                         let text = descriptions.render().into_text().unwrap_or_default();
                         items.push(Budgeted::optional(
-                            ContentItem::InputText { text },
+                            ContentItem::InputText { text }.into(),
                             BudgetPriority::ToolDescription,
                         ));
                     }
-                    (11, "planned_action", SectionDelivery::user_content(items))
+                    (11, "planned_action", SectionDelivery::UserContent(items))
                 }
             };
             sections.push((position, SectionOutput { id, delivery }));
@@ -613,9 +676,9 @@ fn delivered_message(
     }
 }
 
-// Preserve the delivery cap below the 10K-token context-item guidance. The
-// estimate uses four bytes per token, so each UTF-8-safe part is at most 36KB.
-const MAX_TEXT_PART_ESTIMATED_TOKENS: usize = 9_000;
+/// Delivery cap below the 10K-token context-item guidance, also applied to native calls.
+/// The estimate uses four bytes per token, so each UTF-8-safe text part is at most 36KB.
+pub const MAX_TEXT_PART_ESTIMATED_TOKENS: usize = 9_000;
 
 /// Bounds individual text parts without changing source text or entry identity.
 /// Budget estimates include the extra wire framing before transport conversion.

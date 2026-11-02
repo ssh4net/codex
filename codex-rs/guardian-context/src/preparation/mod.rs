@@ -2,6 +2,7 @@
 //! Collection keeps captured sources intact. This owner applies text and image policy;
 //! delivery checks repeat against current reviewer history after compaction.
 
+mod elastic;
 pub(crate) mod repl;
 pub(crate) mod root;
 mod transcript;
@@ -18,6 +19,7 @@ use crate::RetainedInstructionItem;
 use crate::SectionError;
 use crate::retained_instructions::RetainedInstructionKind;
 use crate::retained_instructions::USER_OMISSION;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -29,6 +31,20 @@ pub(crate) const MAX_INSTRUCTION_TOKENS: usize = 900;
 
 const MAX_APPROVAL_REASON_TOKENS: usize = 512;
 const MAX_DESCRIPTION_TOKENS: usize = 400;
+
+/// Request selection policy; persistent capture and storage bounds are independent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ContextBudgeting {
+    /// Preserve existing per-section request selection.
+    #[default]
+    Fixed,
+    /// Keep captured candidates complete until optional entry capping and allocation.
+    Elastic,
+}
+
+#[cfg(test)]
+#[path = "source_tests.rs"]
+mod source_tests;
 
 /// Prepares the host-selected transcript suffix and all synchronous context sections.
 /// Cursor selection remains with the host; its offset addresses the collected entries.
@@ -157,7 +173,7 @@ pub(crate) fn prepare_sync_sections(context: &mut CollectedContext) {
             if let crate::ContextSection::RootConversation { content } = section
                 && let crate::RootConversationContent::Collected(candidates) = content
             {
-                let prepared = candidates.prepare();
+                let prepared = candidates.prepare(ContextBudgeting::Fixed);
                 *content = crate::RootConversationContent::Prepared(
                     crate::authorization::root_conversation_items(prepared.messages),
                 );
@@ -176,6 +192,7 @@ pub(crate) fn prepare_sync_sections(context: &mut CollectedContext) {
                 responses,
                 omitted_responses: *omitted_responses,
                 mode: *mode,
+                budgeting: ContextBudgeting::Fixed,
             };
             let items = snapshot.render_inputs();
             evidence.content = crate::node_repl::NodeReplEvidenceContent::Prepared(items);
@@ -256,4 +273,67 @@ pub async fn prepare_sync_images<'a, HistoryCost>(
     if !admit_images {
         context.retain_images(|_, _| false);
     }
+}
+
+/// Applies existing instruction and native-message delivery checks in their original order.
+pub fn prepare_sync_delivery(
+    context: &mut ComposedContext,
+    reviewer_history: &[ResponseItemEnvelope],
+) -> Result<(), SectionError> {
+    context.retain_new_instructions(reviewer_history);
+    context.retain_new_native_messages(reviewer_history)
+}
+
+/// Host policy for preparing an image for the review model.
+/// Implementations borrow unchanged images, own resized images, and omit rejected images.
+pub trait SyncImagePreparer: Sync {
+    fn prepare<'image>(
+        &self,
+        image: &'image ImageReference,
+        detail: &mut Option<ImageDetail>,
+    ) -> Option<Cow<'image, ImageReference>>;
+}
+
+/// Model and reviewer facts resolved before preparing any synchronous request.
+/// Image capability is independent of the model context window used for all evidence.
+pub struct SyncPreparation<'a> {
+    pub reviewer_history: &'a [ResponseItemEnvelope],
+    pub context_window: Option<i64>,
+    pub history_tokens: i64,
+    pub supports_images: bool,
+    pub image_preparer: &'a dyn SyncImagePreparer,
+    pub estimate_tokens: fn(&ResponseItem) -> i64,
+}
+
+/// Prepares every synchronous request with host facts available before selection.
+/// Existing entrypoints and prepare-then-compose ordering stay unchanged.
+/// Image admission uses the exact framed cost, as in the existing image policy.
+pub async fn prepare_sync_context_with_facts(
+    context: CollectedContext,
+    profile: &ContextProfile,
+    entry_number_offset: usize,
+    presentation: ContextPresentation<'_>,
+    preparation: SyncPreparation<'_>,
+) -> Result<ComposedContext, SectionError> {
+    let mut context = prepare_sync_context(context, profile, entry_number_offset, presentation)?;
+    if context
+        .section_costs()
+        .any(|(_, cost)| cost.image_count > 0)
+    {
+        prepare_sync_images(
+            &mut context,
+            preparation
+                .reviewer_history
+                .iter()
+                .map(|envelope| &envelope.item),
+            preparation
+                .context_window
+                .filter(|_| preparation.supports_images),
+            |image, detail| preparation.image_preparer.prepare(image, detail),
+            preparation.estimate_tokens,
+            || std::future::ready(preparation.history_tokens),
+        )
+        .await;
+    }
+    Ok(context)
 }

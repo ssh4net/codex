@@ -51,7 +51,6 @@ use crate::render::line_utils::line_to_static;
 use crate::style::accent_color;
 use crate::style::table_separator_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
-use crate::terminal_hyperlinks::LinePrefixPolicy;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::terminal_hyperlinks::visible_lines;
 use crate::terminal_hyperlinks::web_destination;
@@ -489,7 +488,6 @@ struct Writer<'a, 'policy> {
     in_code_block: bool,
     code_block_lang: Option<String>,
     code_block_buffer: String,
-    code_block_prefix_policy: LinePrefixPolicy,
     code_block_content_end: usize,
     wrap_width: Option<usize>,
     cwd: Option<PathBuf>,
@@ -501,7 +499,6 @@ struct Writer<'a, 'policy> {
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
     current_line_in_code_block: bool,
-    current_line_prefix_policy: LinePrefixPolicy,
     table_state: Option<TableState>,
 }
 
@@ -536,7 +533,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             in_code_block: false,
             code_block_lang: None,
             code_block_buffer: String::new(),
-            code_block_prefix_policy: LinePrefixPolicy::Apply,
             code_block_content_end: 0,
             wrap_width,
             cwd: cwd.map(Path::to_path_buf),
@@ -548,7 +544,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             current_subsequent_indent: Vec::new(),
             current_line_style: Style::default(),
             current_line_in_code_block: false,
-            current_line_prefix_policy: LinePrefixPolicy::Apply,
             table_state: None,
         }
     }
@@ -666,10 +661,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             }
             Tag::CodeBlock(kind) => {
                 self.code_block_content_end = range.end;
-                let prefix_policy = match kind {
-                    CodeBlockKind::Fenced(_) => LinePrefixPolicy::Omit,
-                    CodeBlockKind::Indented => LinePrefixPolicy::Apply,
-                };
                 let indent = match kind {
                     CodeBlockKind::Fenced(_) => None,
                     CodeBlockKind::Indented => Some(Span::from(" ".repeat(4))),
@@ -678,7 +669,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
                     CodeBlockKind::Fenced(lang) => Some(lang.to_string()),
                     CodeBlockKind::Indented => None,
                 };
-                self.start_codeblock(lang, indent, prefix_policy)
+                self.start_codeblock(lang, indent)
             }
             Tag::List(start) => {
                 if self.pending_marker_line
@@ -1122,12 +1113,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
         self.needs_newline = false;
     }
 
-    fn start_codeblock(
-        &mut self,
-        lang: Option<String>,
-        indent: Option<Span<'static>>,
-        prefix_policy: LinePrefixPolicy,
-    ) {
+    fn start_codeblock(&mut self, lang: Option<String>, indent: Option<Span<'static>>) {
         self.flush_current_line();
         let first_item_block = self.pending_marker_line
             && self
@@ -1140,7 +1126,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             self.push_blank_line();
         }
         self.in_code_block = true;
-        self.code_block_prefix_policy = prefix_policy;
 
         // Extract the language token from the info string.  CommonMark info
         // strings can contain metadata after the language, separated by commas,
@@ -1198,7 +1183,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
 
         self.needs_newline = true;
         self.in_code_block = false;
-        self.code_block_prefix_policy = LinePrefixPolicy::Apply;
         self.indent_stack.pop();
     }
 
@@ -2373,7 +2357,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
                 source.prefix_bytes = spans.iter().map(|span| span.content.len()).sum();
                 source.continuation_indent = self.current_subsequent_indent.clone().into();
                 line.source = Some(source);
-                line.prefix_policy = self.current_line_prefix_policy;
                 let shift = Self::spans_display_width(&spans);
                 spans.append(&mut line.line.spans);
                 for hyperlink in &mut line.hyperlinks {
@@ -2386,7 +2369,6 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             self.current_initial_indent.clear();
             self.current_subsequent_indent.clear();
             self.current_line_in_code_block = false;
-            self.current_line_prefix_policy = LinePrefixPolicy::Apply;
             self.line_ends_with_local_link_target = false;
         }
     }
@@ -2448,19 +2430,9 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             line.style
         };
         let was_pending = self.pending_marker_line;
-        let prefix_policy = if self.in_code_block {
-            self.code_block_prefix_policy
-        } else {
-            LinePrefixPolicy::Apply
-        };
 
-        if prefix_policy == LinePrefixPolicy::Omit {
-            self.current_initial_indent.clear();
-            self.current_subsequent_indent.clear();
-        } else {
-            self.current_initial_indent = self.prefix_spans(was_pending);
-            self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
-        }
+        self.current_initial_indent = self.prefix_spans(was_pending);
+        self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
         self.current_line_style = style;
         self.copy_line = crate::markdown_copy::CopyLine::default();
         self.copy_line.prefix = self.copy_prefix(was_pending);
@@ -2472,11 +2444,8 @@ impl<'a, 'policy> Writer<'a, 'policy> {
         // Heading markers are already visible; retain them as Markdown syntax.
         self.copy_line
             .push(line.spans.iter().map(|span| span.content.len()).sum(), &[]);
-        let mut hyperlink_line = HyperlinkLine::new(line);
-        hyperlink_line.prefix_policy = prefix_policy;
-        self.current_line_content = Some(hyperlink_line);
+        self.current_line_content = Some(HyperlinkLine::new(line));
         self.current_line_in_code_block = self.in_code_block;
-        self.current_line_prefix_policy = prefix_policy;
         self.line_ends_with_local_link_target = false;
 
         self.pending_marker_line = false;

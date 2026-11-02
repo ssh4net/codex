@@ -1,12 +1,13 @@
 ---
 source: tui/src/transcript_view/copy_mode_tests.rs
+assertion_line: 169
 expression: "snapshots.join(\"\\n---\\n\")"
 ---
 ................ | • Before        
 ................ |                 
-################ | longer line     
+################ |   longer line   
 ################ |                 
-################ | x               
+################ |   x             
 ................ |                 
 ................ |   After         
 ................ |                 
@@ -17,10 +18,10 @@ expression: "snapshots.join(\"\\n---\\n\")"
 ---
 ........ | • Before
 ........ |         
-######## | longer  
-######## | line    
+######## |   longer
+######## |   line  
 ######## |         
-######## | x       
+######## |   x     
 ........ |         
 ........ |   After 
 ........ |         
